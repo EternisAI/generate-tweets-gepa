@@ -1,0 +1,16 @@
+[project]
+name = "temporal-tweet-worker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "temporalio>=1.6.0",
+]
+
+[project.scripts]
+worker = "temporal_tweet_worker.worker:main"
+client = "temporal_tweet_worker.client:main"
+
+[tool.uv]
+package = true
