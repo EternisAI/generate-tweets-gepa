@@ -22,6 +22,10 @@ temporal workflow start \
   --input '{"topic":"Artificial Intelligence","articles":["AI breakthrough in natural language processing","Machine learning transforms healthcare diagnostics","Ethical considerations in AI development"]}'
 ```
 
+## Notes
+
+Temporal CLI: http://localhost:8233/
+
 ## Todo
 
 - Run temporal worker with mock code
