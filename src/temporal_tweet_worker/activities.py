@@ -89,6 +89,11 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
     """Use x_api_explorer_enhanced to gather real Twitter insights about a topic"""
     
     try:
+        # Generate workflow UUID
+        import uuid
+        workflow_uuid = str(uuid.uuid4())
+        print(f"[Explore Activity] Generated workflow UUID: {workflow_uuid}")
+
         # Create workflow record if not provided
         if workflow_id is None:
             workflow_id = create_workflow_record(topic)
@@ -159,7 +164,7 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
                     language="en",        # Focus on English tweets
                     output_file=None,     # Don't save to file, process in memory
                     max_tweets=None,      # Don't limit here, we'll limit after filtering
-                    include_media_analysis=False  # Skip media analysis for now
+                    include_media_analysis=True  # Skip media analysis for now
                 )
                 # Filter out any None or invalid tweets
                 if user_tweets:
@@ -242,7 +247,7 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
                     language="en",        # Focus on English tweets
                     output_file=None,     # Don't save to file, process in memory
                     max_tweets=None,      # Don't limit here, we'll limit after filtering
-                    include_media_analysis=False  # Skip media analysis for now
+                    include_media_analysis=True  # Skip media analysis for now
                 )
                 # Filter out any None or invalid tweets
                 if user_tweets:
@@ -377,8 +382,7 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
 
             viral_articles.append({
                 'type': 'viral_quote_tweet_enhanced',
-                'content': combined_content,
-                'source': f"@{enhanced_tweet['username']}",
+                'content': quoted_tweet_text,
                 'likes': enhanced_tweet['likes'],
                 'normalized_score': enhanced_tweet['normalized_engagement'],
                 'follower_count': enhanced_tweet['follower_count'],
@@ -388,6 +392,9 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
 
         # Combine topic articles with viral articles
         all_articles = topic_articles + viral_articles
+        print(f"[Explore Activity] Topic articles: {len(topic_articles)}")
+        print(f"[Explore Activity] Viral articles: {len(viral_articles)}")
+        print(f"[Explore Activity] Total articles: {len(all_articles)}")
 
         # Add viral tweets to exp_result in enhanced format
         # result['viral_tweets'] = viral_tweets_data
@@ -395,14 +402,30 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
         result['total_viral_tweets'] = len(viral_tweets_data)
 
         # Update database with exploration results
-        try:
-            update_exploration_results(
-                workflow_id=workflow_id,
-                topic=topic,
-                articles=all_articles,
-                exp_result=result
-            )
-            print(f"[Explore Activity] Database updated with {len(all_articles)} articles")
+        print(f"[Explore Activity] Preparing to update database with {len(all_articles)} articles")
+        print(f"[Explore Activity] Articles content preview: {all_articles[:1] if all_articles else 'No articles'}")
+
+        # Check if database URL is set
+        import os
+        if not os.getenv('DATABASE_URL'):
+            print(f"[Explore Activity] DATABASE_URL not set - skipping database update")
+            print(f"[Explore Activity] Set DATABASE_URL environment variable to enable database storage")
+        else:
+            try:
+                print(f"[Explore Activity] Calling update_exploration_results...")
+                update_exploration_results(
+                    workflow_id=workflow_id,
+                    topic=topic,
+                    articles=all_articles,
+                    exp_result=result
+                )
+                print(f"[Explore Activity] Database updated successfully with {len(all_articles)} articles")
+            except Exception as db_error:
+                print(f"[Explore Activity] Database update error: {str(db_error)}")
+                print(f"[Explore Activity] Error type: {type(db_error).__name__}")
+                import traceback
+                print(f"[Explore Activity] Full traceback:")
+                traceback.print_exc()
 
             # Save enhanced viral tweets to file in transformed format
             if viral_tweets_enhanced:
@@ -415,17 +438,22 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
 
                 print(f"[Explore Activity] Enhanced viral tweets saved to {output_file}")
                 result['viral_tweets_output_file'] = output_file
-        except Exception as db_error:
-            print(f"[Explore Activity] Database update error: {str(db_error)[:100]}")
-            # Continue execution even if database update fails
         
-        # Add workflow_id to result for downstream activities
-        result["workflow_id"] = workflow_id
+        # Add workflow identifiers to result for downstream activities
+        result["workflow_id"] = workflow_id  # Database integer ID
+        result["workflow_uuid"] = workflow_uuid  # UUID identifier
         return result
         
     except Exception as e:
         print(f"[Explore Activity] Error during exploration: {str(e)}")
         error_msg = str(e)[:50]  # Capture error message within exception scope
+        # Generate UUID for error case if not already generated
+        try:
+            error_uuid = workflow_uuid
+        except NameError:
+            import uuid
+            error_uuid = str(uuid.uuid4())
+
         # Fallback to mock data on error
         return {
             "topic": topic,
@@ -435,7 +463,8 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
             "tweets_analyzed": 0,
             "information_sources": [],
             "tweets": [],
-            "workflow_id": workflow_id
+            "workflow_id": workflow_id or 0,
+            "workflow_uuid": error_uuid
         }
 
 
