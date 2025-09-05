@@ -4,5 +4,5 @@ from typing import List
 
 @dataclass
 class TweetGenerationRequest:
+    """Request to generate tweets about a topic"""
     topic: str
-    articles: List[str]

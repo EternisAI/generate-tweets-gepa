@@ -12,12 +12,12 @@ async def run_worker():
 
     worker = Worker(
         client,
-        task_queue="default",
+        task_queue="tweet-generation",  # Use dedicated queue
         workflows=[GenerateTweetWorkflow],
         activities=[explore, gen_gepa_prompt, gen_tweet],
     )
 
-    print("Starting worker on task queue: default")
+    print("Starting worker on task queue: tweet-generation")
     await worker.run()
 
 

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from typing import List
 
 from temporalio.client import Client
@@ -11,22 +12,17 @@ async def run_client():
     client = await Client.connect("localhost:7233")
 
     request = TweetGenerationRequest(
-        topic="Artificial Intelligence",
-        articles=[
-            "AI breakthrough in natural language processing",
-            "Machine learning transforms healthcare diagnostics",
-            "Ethical considerations in AI development",
-        ]
+        topic="Artificial Intelligence"
     )
 
     print(f"Starting workflow for topic: {request.topic}")
-    print(f"Processing {len(request.articles)} articles...")
+    print("Processing articles from Twitter exploration...")
 
     result = await client.execute_workflow(
         GenerateTweetWorkflow.run,
         request,
-        id="generate-tweet-workflow-001",
-        task_queue="default",
+        id=f"generate-tweet-workflow-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        task_queue="tweet-generation",  # Use dedicated queue
     )
 
     print("\n🐦 Generated Tweet Drafts:")
