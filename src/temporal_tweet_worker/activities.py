@@ -18,8 +18,62 @@ from temporalio.exceptions import CancelledError
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from x_api_explorer_enhanced import EnhancedXTweetExplorer
+from add_humor_analysis import analyze_tweet_humor
 from gepa_official_optimizer import GEPATweetOptimizer, TweetGeneratorModule
 from openrouter_config import setup_openrouter_model
+
+def analyze_media_for_selected_tweets(tweets_data):
+    """Analyze media only for tweets we actually keep"""
+    print(f"[Media Analysis] Processing {len(tweets_data)} tweets...")
+
+    for i, tweet_data in enumerate(tweets_data):
+        try:
+            print(f"[Media Analysis] Tweet {i+1} keys: {list(tweet_data.keys())}")
+
+            # Check if the tweet already has media data from the original fetch
+            quote_tweet = tweet_data.get('quote_tweet', {})
+            quoted_tweet = tweet_data.get('quoted_tweet', {})
+
+            print(f"[Media Analysis] Quote tweet keys: {list(quote_tweet.keys()) if quote_tweet else 'None'}")
+            print(f"[Media Analysis] Quoted tweet keys: {list(quoted_tweet.keys()) if quoted_tweet else 'None'}")
+
+            # Try to get media from quoted tweet first (more likely to have media)
+            media_data = quoted_tweet.get('media') if quoted_tweet else None
+            print(f"[Media Analysis] Quoted tweet media raw: {media_data}")
+
+            if not media_data:
+                # Fall back to quote tweet media
+                media_data = quote_tweet.get('media') if quote_tweet else None
+                print(f"[Media Analysis] Quote tweet media raw: {media_data}")
+
+            # Ensure media_data is a list
+            if media_data is None:
+                media_data = []
+                print(f"[Media Analysis] Media data was None, set to empty list")
+            elif not isinstance(media_data, list):
+                media_data = [media_data]
+                print(f"[Media Analysis] Media data converted to list: {media_data}")
+
+            print(f"[Media Analysis] Final media data: {media_data}")
+            print(f"[Media Analysis] Media data found: {len(media_data)} items")
+
+            if media_data:
+                print(f"[Media Analysis] Found {len(media_data)} media items for tweet {i+1}")
+                # Add media analysis to the tweet data
+                tweet_data['media_analysis_data'] = media_data
+            else:
+                print(f"[Media Analysis] No media found for tweet {i+1}")
+
+            print(f"[Media Analysis] Processed tweet {i+1}/{len(tweets_data)}")
+
+        except Exception as e:
+            print(f"[Media Analysis] Error processing tweet {i+1}: {str(e)[:100]}")
+            continue
+
+    return tweets_data
+
+# Import viral_tweets and extract_tweets functionality
+from viral_tweets import get_viral_tweets
 
 
 from .db import (
@@ -84,65 +138,286 @@ async def explore(topic: str, workflow_id: int = None) -> Dict[str, Any]:
                     exp_result=fallback_result
                 )
             return fallback_result
-        
-        # Aggregate insights from real tweets
+        usernames = ["growing_daniel", "allgarled"]
+
+        # Loop over usernames to scrape viral quote tweets from each profile (max 2 total)
+        print("[Explore Activity] Scraping viral quote tweets from multiple profiles (max 2 total)...")
+        viral_tweets_data = []
+        max_viral_tweets = 2  # Limit to maximum 2 viral tweets
+
+        for username in usernames:
+            # Check if we already have enough viral tweets
+            if len(viral_tweets_data) >= max_viral_tweets:
+                print(f"[Explore Activity] Already have {len(viral_tweets_data)} viral tweets, skipping @{username}")
+                continue
+
+            print(f"[Explore Activity] Processing profile: @{username}")
+            try:
+                user_tweets = get_viral_tweets(
+                    username=username,
+                    min_likes=100,        # Minimum engagement threshold
+                    language="en",        # Focus on English tweets
+                    output_file=None,     # Don't save to file, process in memory
+                    max_tweets=None,      # Don't limit here, we'll limit after filtering
+                    include_media_analysis=False  # Skip media analysis for now
+                )
+                # Filter out any None or invalid tweets
+                if user_tweets:
+                    valid_tweets = [tweet for tweet in user_tweets if tweet and isinstance(tweet, dict)]
+                                    # Only take what we need to reach the limit
+                remaining_slots = max_viral_tweets - len(viral_tweets_data)
+                tweets_to_add = valid_tweets[:remaining_slots]
+
+                viral_tweets_data.extend(tweets_to_add)
+                print(f"[Explore Activity] Added {len(tweets_to_add)} viral tweets from @{username} (total: {len(viral_tweets_data)})")
+
+                # Stop if we've reached the limit
+                if len(viral_tweets_data) >= max_viral_tweets:
+                    print(f"[Explore Activity] Reached viral tweet limit of {max_viral_tweets}")
+                    break
+                else:
+                    print(f"[Explore Activity] No viral tweets found from @{username}")
+            except Exception as e:
+                print(f"[Explore Activity] Error processing @{username}: {str(e)[:100]}")
+                continue
+
+        print(f"[Explore Activity] Total viral tweets collected: {len(viral_tweets_data)} (limited to {max_viral_tweets})")
+
+        # Do media analysis only on tweets we actually keep
+        if viral_tweets_data:
+            print(f"[Explore Activity] Performing media analysis on {len(viral_tweets_data)} selected tweets...")
+            viral_tweets_data = analyze_media_for_selected_tweets(viral_tweets_data)
+
+        # Aggregate insights from real tweets and viral tweets
         all_keywords = set()
-        all_insights = []
+
+        # Process tweets from EnhancedXTweetExplorer
         total_engagement = 0
-        sentiments = []
-        information_sources = []
-        
         for tweet_data in dataset:
             # Extract keywords from tweet text
             words = tweet_data['tweet'].lower().split()
             keywords = [w.strip('#.,!?') for w in words if len(w) > 4 and not w.startswith('http')]
             all_keywords.update(keywords[:5])
-            
-            # Collect insights from information sources
-            for info in tweet_data.get('information_detailed', []):
-                if info['type'] not in ['parent_tweet', 'search_query']:
-                    all_insights.append(f"{info['type']}: {info['content'][:100]}")
-                    information_sources.append(info)
-            
+
             # Calculate engagement
             likes = tweet_data.get('likes', 0)
             retweets = tweet_data.get('retweets', 0)
-            total_engagement += (likes + retweets * 2)  # Weight retweets more
-            
-            
-        
-        # Calculate engagement score with better normalization
-        avg_engagement = total_engagement / max(1, len(dataset))
-        # Normalize by a soft cap so a single viral tweet doesn't pin to 1.0
-        engagement_score = min(1.0, avg_engagement / 500.0)  # 500 is a reasonable baseline for good engagement
-        
+
+            total_engagement += (likes + retweets * 2)  # Weight retweets more       
         # Log final results
         result = {
             "topic": topic,
-            "insights": all_insights[:5] if all_insights else ["Analysis of recent Twitter discussions"],
             "keywords": list(all_keywords)[:10],
-            "engagement_score": round(engagement_score, 2),
-            "tweets_analyzed": len(dataset),
-            "information_sources": information_sources[:10],  # Include top information sources
-            "tweets": dataset  # Include the actual tweets
+            "tweets_analyzed": len(dataset)
         }
-        
-        print(f"[Explore Activity] Exploration complete: {len(result['insights'])} insights, {len(result['keywords'])} keywords")
-        print(f"[Explore Activity] Engagement score: {result['engagement_score']}")
-        tweets = result.get("tweets", [])
-        # Extract information with consistent field names
-        flat_infos = [
-            item for t in tweets 
-            for item in t.get("information_detailed", [])
-            if item.get("type") not in ["parent_tweet", "search_query"]  # Filter out non-content sources
-        ]
+
+        print(f"[Explore Activity] Exploration complete: {len(result['keywords'])} keywords, {len(dataset)} tweets analyzed")
+
+        # Create topic-based articles content
+        topic_articles = []
+        if topic:
+            topic_articles.append({
+                'type': 'topic_content',
+                'content': f"Topic analysis for: {topic}",
+                'source': 'topic_input'
+            })
+        usernames = ["growing_daniel", "allgarled"]
+
+        # Loop over usernames to scrape viral quote tweets from each profile (max 2 total)
+        print("[Explore Activity] Scraping viral quote tweets from multiple profiles (max 2 total)...")
+        viral_tweets_data = []
+        max_viral_tweets = 2  # Limit to maximum 2 viral tweets
+
+        for username in usernames:
+            # Check if we already have enough viral tweets
+            if len(viral_tweets_data) >= max_viral_tweets:
+                print(f"[Explore Activity] Already have {len(viral_tweets_data)} viral tweets, skipping @{username}")
+                continue
+
+            print(f"[Explore Activity] Processing profile: @{username}")
+            try:
+                user_tweets = get_viral_tweets(
+                    username=username,
+                    min_likes=100,        # Minimum engagement threshold
+                    language="en",        # Focus on English tweets
+                    output_file=None,     # Don't save to file, process in memory
+                    max_tweets=None,      # Don't limit here, we'll limit after filtering
+                    include_media_analysis=False  # Skip media analysis for now
+                )
+                # Filter out any None or invalid tweets
+                if user_tweets:
+                    valid_tweets = [tweet for tweet in user_tweets if tweet and isinstance(tweet, dict)]
+                                    # Only take what we need to reach the limit
+                remaining_slots = max_viral_tweets - len(viral_tweets_data)
+                tweets_to_add = valid_tweets[:remaining_slots]
+
+                viral_tweets_data.extend(tweets_to_add)
+                print(f"[Explore Activity] Added {len(tweets_to_add)} viral tweets from @{username} (total: {len(viral_tweets_data)})")
+
+                # Stop if we've reached the limit
+                if len(viral_tweets_data) >= max_viral_tweets:
+                    print(f"[Explore Activity] Reached viral tweet limit of {max_viral_tweets}")
+                    break
+                else:
+                    print(f"[Explore Activity] No viral tweets found from @{username}")
+            except Exception as e:
+                print(f"[Explore Activity] Error processing @{username}: {str(e)[:100]}")
+                continue
+
+        print(f"[Explore Activity] Total viral tweets collected: {len(viral_tweets_data)} (limited to {max_viral_tweets})")
+
+        # Aggregate insights from real tweets and viral tweets
+
+        def remove_links(text):
+            """Remove URLs from text"""
+            import re
+            # Remove http/https URLs
+            text = re.sub(r'https?://[^\s]+', '', text)
+            # Remove twitter.com links (common in tweets)
+            text = re.sub(r'twitter\.com/[^\s]+', '', text)
+            # Remove x.com links (Twitter's new domain)
+            text = re.sub(r'x\.com/[^\s]+', '', text)
+            # Clean up extra whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+
+        # Do media analysis only on tweets we actually keep
+        if viral_tweets_data:
+            print(f"[Explore Activity] Performing media analysis on {len(viral_tweets_data)} selected tweets...")
+            viral_tweets_data = analyze_media_for_selected_tweets(viral_tweets_data)
+
+        # Create enhanced viral tweets data in transformed format
+        viral_tweets_enhanced = []
+        for viral_tweet in viral_tweets_data:
+            quote_tweet = viral_tweet.get('quote_tweet', {})
+            quoted_tweet = viral_tweet.get('quoted_tweet', {})
+
+            # Extract basic tweet information
+            tweet_text = remove_links(quote_tweet.get('text', ''))
+            metrics = quote_tweet.get('metrics', {})
+            author_info = quote_tweet.get('author', {})
+
+            # Create enhanced information analysis
+            quoted_text = remove_links(quoted_tweet.get('text', ''))
+            media_info = quoted_tweet.get('media', [])
+
+            # Build media analysis
+            media_analysis = []
+            # First try to use the media analysis data we collected
+            media_analysis_data = viral_tweet.get('media_analysis_data', [])
+
+            if media_analysis_data:
+                for media in media_analysis_data:
+                    if isinstance(media, dict) and 'analysis' in media:
+                        # Remove links from media analysis as well
+                        clean_analysis = remove_links(media['analysis'])
+                        media_analysis.append(clean_analysis)
+            elif media_info:
+                # Fall back to original media_info if no analysis data
+                for media in media_info:
+                    if isinstance(media, dict) and 'analysis' in media:
+                        # Remove links from media analysis as well
+                        clean_analysis = remove_links(media['analysis'])
+                        media_analysis.append(clean_analysis)
+
+            # Analyze humor in the quote tweet pair
+            try:
+                import os
+                if os.getenv('OPENROUTER_API_KEY'):
+                    humor_analysis = analyze_tweet_humor(tweet_text, quoted_text)
+                    # Escape quotes and newlines for JSON
+                    humor_analysis = humor_analysis.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\r', '\\r')
+                else:
+                    print("[Explore Activity] OPENROUTER_API_KEY not set, skipping humor analysis")
+                    humor_analysis = "Humor analysis unavailable - API key not configured"
+            except Exception as e:
+                print(f"[Explore Activity] Error analyzing humor: {str(e)[:100]}")
+                humor_analysis = f"Humor analysis failed: {str(e)[:50]}"
+
+            # Create comprehensive information entry using proper JSON
+            import json
+
+            info_dict = {
+                "text": quoted_text,
+                "media_analysis": media_analysis if media_analysis else ["No media analysis available"],
+                "humor_analysis": humor_analysis
+            }
+
+            info_content = json.dumps(info_dict, indent=2, ensure_ascii=False)
+
+            # Create enhanced entry in transformed format
+            enhanced_entry = {
+                "tweet": tweet_text,
+                "username": author_info.get('username', 'unknown'),
+                "created_at": quote_tweet.get('created_at', ''),
+                "retweets": metrics.get('retweets', 0),
+                "replies": metrics.get('replies', 0),
+                "likes": metrics.get('likes', 0),
+                "quotes": metrics.get('quotes', 0),
+                "information": [info_content],
+                "follower_count": author_info.get('follower_count', 0),
+                "normalized_engagement": metrics.get('normalized_likes', 0),
+                "is_viral": True
+            }
+
+            viral_tweets_enhanced.append(enhanced_entry)
+
+        # Create articles from viral tweets
+        viral_articles = []
+        for i, enhanced_tweet in enumerate(viral_tweets_enhanced):
+            # Get the corresponding viral tweet data to extract quoted tweet directly
+            quoted_tweet_text = ""
+            if i < len(viral_tweets_data):
+                viral_tweet = viral_tweets_data[i]
+                quoted_tweet = viral_tweet.get('quoted_tweet', {})
+                quoted_tweet_text = remove_links(quoted_tweet.get('text', ''))
+
+            # Combine quote tweet and quoted tweet content
+            combined_content = f"Quote: {enhanced_tweet['tweet']}\n\nQuoted: {quoted_tweet_text}"
+
+            viral_articles.append({
+                'type': 'viral_quote_tweet_enhanced',
+                'content': combined_content,
+                'source': f"@{enhanced_tweet['username']}",
+                'likes': enhanced_tweet['likes'],
+                'normalized_score': enhanced_tweet['normalized_engagement'],
+                'follower_count': enhanced_tweet['follower_count'],
+                'quote_tweet': enhanced_tweet['tweet'],
+                'quoted_tweet': quoted_tweet_text
+            })
+
+        # Combine topic articles with viral articles
+        all_articles = topic_articles + viral_articles
+
+        # Add viral tweets to exp_result in enhanced format
+        # result['viral_tweets'] = viral_tweets_data
+        result['tweets'] = viral_tweets_enhanced
+        result['total_viral_tweets'] = len(viral_tweets_data)
+
         # Update database with exploration results
-        update_exploration_results(
-            workflow_id=workflow_id,
-            topic=topic,
-            articles=flat_infos,
-            exp_result=result
-        )
+        try:
+            update_exploration_results(
+                workflow_id=workflow_id,
+                topic=topic,
+                articles=all_articles,
+                exp_result=result
+            )
+            print(f"[Explore Activity] Database updated with {len(all_articles)} articles")
+
+            # Save enhanced viral tweets to file in transformed format
+            if viral_tweets_enhanced:
+                import json
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_file = f"viral_tweets_enhanced_{timestamp}.json"
+
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(viral_tweets_enhanced, f, indent=2, ensure_ascii=False)
+
+                print(f"[Explore Activity] Enhanced viral tweets saved to {output_file}")
+                result['viral_tweets_output_file'] = output_file
+        except Exception as db_error:
+            print(f"[Explore Activity] Database update error: {str(db_error)[:100]}")
+            # Continue execution even if database update fails
         
         # Add workflow_id to result for downstream activities
         result["workflow_id"] = workflow_id
