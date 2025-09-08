@@ -204,14 +204,25 @@ class TrainingPipeline:
             'mutation_rate': 0.3,
             'elite_ratio': 0.25,
             'samples_per_evaluation': 5,
-            'initial_prompt': """You are a witty social media writer. 
-Given the original tweet and its media analysis (if present), create a new tweet that:
-- Synthesizes the *insight or irony* of the source, not just restates it.
-- Uses tone levers: surprising twist, humor, provocation, or emotional resonance.
-- Feels conversational and human (avoid corporate tone).
-- Stays punchy and scannable (under 280 chars).
-- Avoids copying phrases; aim for a *fresh angle*.
-- Ends with rhythm: either a kicker, shrug, or ironic beat.
+            'initial_prompt': """You are a witty social media writer crafting viral tweets.
+
+Given the tweet context which includes:
+1. Media Analysis (if present) - Detailed analysis of images/media in the tweet
+2. Information Sources - Additional context, quotes, and background information
+
+Create a new tweet that:
+- If media analysis is present:
+  • Leverages visual elements and imagery described
+  • Uses media insights to add depth or irony
+  • References visual details that resonate emotionally
+- For all tweets:
+  • Synthesizes the *insight or irony* of the source
+  • Uses tone levers: surprising twist, humor, provocation
+  • Feels conversational and authentic (never corporate)
+  • Stays punchy and scannable (under 280 chars)
+  • Avoids copying phrases; finds a *fresh angle*
+  • Ends with rhythm: kicker, shrug, or ironic beat
+
 Output only the tweet text."""
         }
     
@@ -225,50 +236,30 @@ Output only the tweet text."""
         model = self.config['model']
         console.print(f"[cyan]Configuring DSPy with model: {model}[/cyan]")
         
-        # Try OpenRouter first if available
-        if not model.startswith('openai/') and not model.startswith('anthropic/'):
-            openrouter_key = os.getenv('OPENROUTER_API_KEY')
-            if openrouter_key:
-                try:
-                    import sys
-                    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-                    from openrouter_config import setup_openrouter_model
-                    lm = setup_openrouter_model(model, openrouter_key)
-                    dspy.settings.configure(lm=lm)
-                    console.print("[green]DSPy configured successfully with OpenRouter[/green]")
-                    console.print("[dim]System logging all learning and changes...[/dim]\n")
-                    return
-                except Exception as e:
-                    console.print(f"[yellow]OpenRouter setup failed: {e}[/yellow]")
-                    console.print("[cyan]Falling back to direct provider...[/cyan]")
-        
-        # DSPy 3.0+ syntax
-        if 'gpt' in model.lower():
-            api_key = os.getenv('OPENAI_API_KEY')
-            if not api_key:
-                console.print("[red]OPENAI_API_KEY not found in environment variables[/red]")
-                console.print("[yellow]Please set OPENAI_API_KEY environment variable[/yellow]")
+        # Always use OpenRouter
+        openrouter_key = os.getenv('OPENROUTER_API_KEY')
+        if not openrouter_key:
+            console.print("[red]Error: OPENROUTER_API_KEY not found in environment variables[/red]")
+            console.print("[yellow]Please set OPENROUTER_API_KEY environment variable[/yellow]")
+            raise ValueError("Missing OPENROUTER_API_KEY")
+
+        try:
+            import sys
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from openrouter_config import setup_openrouter_model
             
-            # Handle GPT models - GPT-5 needs special parameters [[memory:7215547]]
-            if '5' in model or model == 'gpt-5':
-                # GPT-5 is a reasoning model requiring temperature=1.0 and max_tokens>=20000
-                lm = dspy.LM('openai/gpt-5', api_key=api_key, temperature=1.0, max_tokens=20000)
-                console.print("[green]Using GPT-5 reasoning model[/green]")
-            elif '4' in model or model == 'gpt-4':
-                lm = dspy.LM('openai/gpt-4', api_key=api_key, max_tokens=500)
-                console.print("[green]Using GPT-4 model[/green]")
-            else:
-                lm = dspy.LM(f'openai/{model}', api_key=api_key, max_tokens=500)
-        elif 'claude' in model.lower():
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if not api_key:
-                console.print("[red]ANTHROPIC_API_KEY not found in environment variables[/red]")
-                console.print("[yellow]Please set ANTHROPIC_API_KEY environment variable[/yellow]")
+            # If model doesn't have provider prefix, add openai/ for compatibility
+            if not any(model.startswith(p) for p in ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/']):
+                model = f"openai/{model}"
             
-            lm = dspy.LM(f'anthropic/{model}', api_key=api_key)
-        else:
-            console.print(f"[yellow]Unknown model type: {model}, using gpt-5[/yellow]")
-            lm = dspy.LM('openai/gpt-5', api_key=os.getenv('OPENAI_API_KEY'), max_tokens=500)
+            lm = setup_openrouter_model(model)
+            dspy.settings.configure(lm=lm)
+            console.print("[green]DSPy configured successfully with OpenRouter[/green]")
+            console.print(f"[cyan]Using model: {model}[/cyan]")
+            console.print("[dim]System logging all learning and changes...[/dim]\n")
+        except Exception as e:
+            console.print(f"[red]OpenRouter setup failed: {e}[/red]")
+            raise
         
         dspy.settings.configure(lm=lm)
         console.print("[green]DSPy configured successfully[/green]")
@@ -280,8 +271,11 @@ Output only the tweet text."""
         prepared_data = []
         
         for tweet_data in self.train_data:
-            # Format information sources
-            info_context = self.data_processor.format_information(tweet_data.information)
+            # Format information sources and media analysis
+            info_context = self.data_processor.format_information(
+                information=tweet_data.information,
+                media_analysis=tweet_data.media_analysis
+            )
             
             prepared_data.append({
                 'information_context': info_context,
@@ -290,7 +284,8 @@ Output only the tweet text."""
                 'metadata': {
                     'username': tweet_data.username,
                     'likes': tweet_data.likes,
-                    'retweets': tweet_data.retweets
+                    'retweets': tweet_data.retweets,
+                    'has_media_analysis': bool(tweet_data.media_analysis)
                 }
             })
         

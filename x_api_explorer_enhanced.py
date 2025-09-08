@@ -34,17 +34,17 @@ console = Console()
 
 def setup_dspy_model(model_name: str, exit_on_error: bool = False) -> dspy.LM:
     """
-    Unified model setup function for DSPy
+    Unified model setup function for DSPy using OpenRouter
     
     Args:
-        model_name: The model name (e.g., "openai/gpt-5", "anthropic/claude-3")
+        model_name: The model name (e.g., "gpt-5", "claude-3-opus")
         exit_on_error: If True, exits the program on error. If False, raises exception.
         
     Returns:
         The configured LM instance
     """
-    if "/" in model_name and not model_name.startswith("openai/"):
-        # OpenRouter model
+    try:
+        # Check for OpenRouter API key
         api_key = os.getenv('OPENROUTER_API_KEY')
         if not api_key:
             console.print("[red]Error: OPENROUTER_API_KEY not found[/red]")
@@ -52,26 +52,14 @@ def setup_dspy_model(model_name: str, exit_on_error: bool = False) -> dspy.LM:
                 sys.exit(1)
             else:
                 raise ValueError("Missing OPENROUTER_API_KEY")
-        from openrouter_config import setup_openrouter_model
-        return setup_openrouter_model(model_name)
-    else:
-        # OpenAI model
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            console.print("[red]Error: OPENAI_API_KEY not found[/red]")
-            if exit_on_error:
-                sys.exit(1)
-            else:
-                raise ValueError("Missing OPENAI_API_KEY")
         
-        if not model_name.startswith("openai/"):
+        from openrouter_config import setup_openrouter_model
+        
+        # If model doesn't have provider prefix, add openai/ for compatibility
+        if not any(model_name.startswith(p) for p in ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/']):
             model_name = f"openai/{model_name}"
         
-        # GPT-5 and other reasoning models require specific settings
-        if "gpt-5" in model_name or "o1" in model_name or "o3" in model_name:
-            lm = dspy.LM(model_name, api_key=api_key, temperature=1.0, max_tokens=20000)
-        else:
-            lm = dspy.LM(model_name, api_key=api_key, max_tokens=1000)
+        lm = setup_openrouter_model(model_name)
         
         # Try to configure, but if in async context, just return the LM
         try:
@@ -83,7 +71,14 @@ def setup_dspy_model(model_name: str, exit_on_error: bool = False) -> dspy.LM:
             else:
                 raise
         
+        console.print(f"[green]Using OpenRouter model: {model_name}[/green]")
         return lm
+        
+    except Exception as e:
+        console.print(f"[red]OpenRouter setup failed: {e}[/red]")
+        if exit_on_error:
+            sys.exit(1)
+        raise
 
 class XAPIClient:
     """Enhanced client for Twitter/X API v2 with conversation fetching"""

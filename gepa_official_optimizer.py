@@ -171,13 +171,13 @@ Return:
             )
 
 class TweetGenerationSignature(dspy.Signature):
-    """Signature for tweet generation from information sources"""
+    """Signature for tweet generation from information sources and media analysis"""
     
     information_context = dspy.InputField(
-        desc="Source tweets, articles, or information to base the tweet on"
+        desc="Source tweets, articles, media analysis, and additional information to base the tweet on. Media analysis will be prefixed with [Media Analysis] if present."
     )
     generated_tweet = dspy.OutputField(
-        desc="A viral tweet (max 280 chars) that synthesizes key insights"
+        desc="A viral tweet (max 280 chars) that synthesizes key insights and leverages media analysis when available"
     )
 
 class TweetGeneratorModule(dspy.Module):
@@ -215,20 +215,17 @@ class GEPATweetOptimizer:
         if reflection_lm:
             self.reflection_lm = reflection_lm
         else:
-            # Create a dedicated reflection LM with higher temperature for creativity
-            # Using gpt-5 as per user preference [[memory:7215547]]
+            # Create a dedicated reflection LM with higher temperature for creativity using OpenRouter
             import os
-            api_key = os.getenv('OPENAI_API_KEY')
-            if api_key:
-                self.reflection_lm = dspy.LM(
-                    'openai/gpt-5',
-                    api_key=api_key,
-                    temperature=1.0,  # Required for GPT-5 reasoning model
-                    max_tokens=20000  # Required >= 20000 for GPT-5
-                )
-                print("[GEPATweetOptimizer] Created gpt-5 reflection model")
-            else:
-                # Fallback to settings LM
+            from openrouter_config import setup_openrouter_model
+            
+            try:
+                # Always use OpenRouter for reflection
+                self.reflection_lm = setup_openrouter_model('openai/gpt-5')  # Using GPT-5 for best reflection
+                print("[GEPATweetOptimizer] Created OpenRouter GPT-5 reflection model")
+            except Exception as e:
+                # Fallback to settings LM if OpenRouter setup fails
+                print(f"[GEPATweetOptimizer] OpenRouter setup failed: {e}")
                 self.reflection_lm = dspy.settings.lm
                 print("[GEPATweetOptimizer] Using default LM for reflection")
         

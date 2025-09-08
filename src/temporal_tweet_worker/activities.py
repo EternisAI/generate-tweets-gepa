@@ -792,7 +792,7 @@ async def gen_tweet(prompt: str, workflow_id: int) -> List[str]:
             print("[Gen Tweet] Falling back to template generation")
     
     # Process articles in parallel
-    max_workers = 20  # Configure number of parallel workers
+    max_workers = 100  # Increased parallel workers for higher throughput
     print(f"[Gen Tweet] Processing {len(articles)} articles with {max_workers} parallel workers")
     
     def process_article(article_data):

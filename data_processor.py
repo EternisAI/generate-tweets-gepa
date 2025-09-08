@@ -7,7 +7,7 @@ import numpy as np
 
 @dataclass
 class TweetData:
-    """Dataclass to represent a tweet with its information context"""
+    """Dataclass to represent a tweet with its information context and media analysis"""
     tweet: str
     username: str
     created_at: str
@@ -16,6 +16,7 @@ class TweetData:
     likes: int
     quotes: int
     information: List[Dict]
+    media_analysis: Optional[str] = None  # Media analysis from GPT-5
     engagement_score: float = field(init=False)
     parsed_date: Optional[datetime] = field(init=False)
     
@@ -78,7 +79,8 @@ class DataProcessor:
                     replies=item.get('replies', 0),
                     likes=item.get('likes', 0),
                     quotes=item.get('quotes', 0),
-                    information=item.get('information', [])
+                    information=item.get('information', []),
+                    media_analysis=item.get('media_analysis')  # Include media analysis if present
                 )
                 self.tweets.append(tweet)
             except Exception as e:
@@ -107,36 +109,46 @@ class DataProcessor:
         print(f"[DataProcessor] Train set: {len(train_data)} tweets, Test set: {len(test_data)} tweets")
         return train_data, test_data
     
-    def format_information(self, information: List) -> str:
-        """Format information sources into a single string context
+    def format_information(self, information: List, media_analysis: Optional[str] = None) -> str:
+        """Format information sources and media analysis into a single string context
         
         Handles both formats:
         - Simple: List of strings (from GPT-5 enhanced extraction)
         - Complex: List of dicts with tweet/username/url fields
-        """
-        if not information:
-            return "No additional context available."
         
+        Also includes media analysis if available
+        """
         formatted = []
-        for i, info in enumerate(information, 1):
-            # Handle string format (GPT-5 enhanced datasets)
-            if isinstance(info, str):
-                formatted.append(f"[Source {i}]: {info}")
-            # Handle dict format (original datasets)
-            elif isinstance(info, dict):
-                if 'tweet' in info:
-                    username = info.get('username', 'Unknown')
-                    tweet_text = info.get('tweet', '')
-                    formatted.append(f"[Source {i}] @{username}: {tweet_text}")
-                elif 'content' in info:
-                    # For information_detailed format
-                    formatted.append(f"[Source {i}]: {info.get('content', '')}")
-                elif 'url' in info:
-                    # Could be a tweet URL or article URL
-                    formatted.append(f"[Source {i}] URL: {info.get('url', '')}")
-            else:
-                # Fallback for any other type
-                formatted.append(f"[Source {i}]: {str(info)}")
+        
+        # Add media analysis first if available
+        if media_analysis:
+            formatted.append("[Media Analysis]")
+            formatted.append(media_analysis)
+        
+        # Add information sources
+        if information:
+            formatted.append("\n[Information Sources]")
+            for i, info in enumerate(information, 1):
+                # Handle string format (GPT-5 enhanced datasets)
+                if isinstance(info, str):
+                    formatted.append(f"[Source {i}]: {info}")
+                # Handle dict format (original datasets)
+                elif isinstance(info, dict):
+                    if 'tweet' in info:
+                        username = info.get('username', 'Unknown')
+                        tweet_text = info.get('tweet', '')
+                        formatted.append(f"[Source {i}] @{username}: {tweet_text}")
+                    elif 'content' in info:
+                        # For information_detailed format
+                        formatted.append(f"[Source {i}]: {info.get('content', '')}")
+                    elif 'url' in info:
+                        # Could be a tweet URL or article URL
+                        formatted.append(f"[Source {i}] URL: {info.get('url', '')}")
+                else:
+                    # Fallback for any other type
+                    formatted.append(f"[Source {i}]: {str(info)}")
+        elif not media_analysis:
+            return "No additional context available."
         
         return "\n\n".join(formatted)
     

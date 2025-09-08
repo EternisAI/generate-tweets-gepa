@@ -23,7 +23,8 @@ def get_db_connection():
         conn = psycopg2.connect(
             db_url,
             sslmode='require',
-            connect_timeout=10
+            connect_timeout=10,
+            gssencmode='disable'  # Disable GSSAPI encryption to force simple SSL
         )
         conn.autocommit = True
         return conn

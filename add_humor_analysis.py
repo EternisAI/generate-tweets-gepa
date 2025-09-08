@@ -5,8 +5,14 @@ import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def analyze_tweet_humor(quote_tweet: str, original_tweet: str) -> str:
-    """Analyze the humor in a quote tweet pair using GPT-5"""
+def analyze_tweet_humor(quote_tweet: str, original_tweet: str = None, analyze_single: bool = False) -> str:
+    """
+    Analyze the humor in tweets using GPT-5.
+    Args:
+        quote_tweet: The main tweet to analyze
+        original_tweet: The original tweet being quoted (optional)
+        analyze_single: If True, analyze quote_tweet as a standalone tweet without context
+    """
 
     api_key = os.getenv('OPENROUTER_API_KEY')
     if not api_key:
@@ -18,7 +24,54 @@ def analyze_tweet_humor(quote_tweet: str, original_tweet: str) -> str:
         'X-Title': 'Tweet Humor Analysis',
     }
 
-    prompt = f"""Analyze the humor in this quote tweet and its original tweet. Follow this structured analysis:
+    if analyze_single:
+        prompt = f"""You are a humor analyst. Given a tweet (which may include a media), produce a structured analysis that can later be used to generate jokes in the same style. Tweet Context: {quote_tweet} Always return valid JSON with these fields:
+
+1. setup_context: {{
+   "about": "What the tweet is about",
+   "referenced_context": "Situation/circumstance being referenced",
+   "quote_interplay": "If it quote-tweets, explain interplay; else null"
+}}
+
+2. humor_elements: {{
+   "primary_mechanisms": ["exaggeration" | "understatement" | "absurdity" | "misdirection" | "irony" | "wordplay" | "register_clash"],
+   "why_funny": "Detailed reasoning",
+   "notable_lines": ["key phrases"]
+}}
+
+3. tone_style: {{
+   "register": "serious-on-silly | silly-on-serious | neutral",
+   "delivery": ["deadpan", "sarcastic", "hyperbolic", "earnest"],
+   "voice_notes": "cadence, POV"
+}}
+
+4. cultural_meme_alignment: {{
+   "patterns_referenced": ["e.g., two-types-of-people, mock-philosophy"],
+   "why_pattern_helps": "How recognition adds humor"
+}}
+
+5. funniness_strength: {{
+   "label": "dry_wit | punchy_dunk | niche_insider",
+   "score_1_to_5": 1,
+   "rationale": "Why this label/score"
+}}
+
+6. humor_archetype: "Concise label (e.g., 'Literalizing Clichés')"
+
+7. structural_blueprint: "e.g., 'setup → contrast → deadpan sting'"
+
+8. relatability_lever: "Everyday experience or shared assumption it taps"
+
+9. replication_guide: {{
+   "template": "fill-in-the-blanks pattern",
+   "slots": ["variables to swap"],
+   "dos": ["keep deadpan last line"],
+   "donts": ["don’t over-explain premise"]
+}}
+
+Ensure: concise, evidence-based analysis grounded in the text; output only the JSON object."""
+    else:
+        prompt = f"""Analyze the humor in this quote tweet and its original tweet. Follow this structured analysis:
 
 Quote Tweet: "{quote_tweet}"
 Original Tweet: "{original_tweet}"
@@ -51,7 +104,7 @@ Answer these questions in detail:
    • Punchy dunk (likely to go viral)?
    • Niche joke (funny only to insiders)?
 
-Provide a comprehensive analysis that explains why this specific quote tweet is funny."""
+Provide a comprehensive analysis that explains why this specific quote tweet interaction is funny."""
 
     payload = {
         'model': 'openai/gpt-5',

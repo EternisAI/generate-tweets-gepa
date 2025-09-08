@@ -77,27 +77,20 @@ def setup_environment():
         load_dotenv()
         console.print("[green]Loaded environment variables from .env[/green]")
     
-    # Check for required API keys
-    openai_key = os.getenv('OPENAI_API_KEY')
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+    # Check for OpenRouter API key
+    openrouter_key = os.getenv('OPENROUTER_API_KEY')
     
-    if not openai_key and not anthropic_key:
-        console.print("[yellow]Warning: No API keys found in environment[/yellow]")
-        console.print("Please set OPENAI_API_KEY or ANTHROPIC_API_KEY")
+    if not openrouter_key:
+        console.print("[yellow]Warning: OPENROUTER_API_KEY not found in environment[/yellow]")
+        console.print("Please set OPENROUTER_API_KEY")
         
         # Prompt for API key
-        choice = Prompt.ask(
-            "Which API would you like to use?",
-            choices=["openai", "anthropic", "skip"],
-            default="skip"
-        )
-        
-        if choice == "openai":
-            key = Prompt.ask("Enter your OpenAI API key", password=True)
-            os.environ['OPENAI_API_KEY'] = key
-        elif choice == "anthropic":
-            key = Prompt.ask("Enter your Anthropic API key", password=True)
-            os.environ['ANTHROPIC_API_KEY'] = key
+        if Confirm.ask("Would you like to enter your OpenRouter API key now?", default=True):
+            key = Prompt.ask("Enter your OpenRouter API key", password=True)
+            os.environ['OPENROUTER_API_KEY'] = key
+            console.print("[green]OpenRouter API key set[/green]")
+        else:
+            console.print("[yellow]Skipping API key setup[/yellow]")
 
 def train_model(config: Dict):
     """Train the tweet generation model using official DSPy GEPA"""
@@ -206,58 +199,28 @@ def generate_tweet(config: Dict, module_path: str = None):
             console.print(f"\nFeedback:\n{evaluation.feedback}")
 
 def setup_dspy_model(model_name: str):
-    """Configure DSPy with specified model
+    """Configure DSPy with specified model using OpenRouter
     
-    Supports:
-    - OpenRouter models (e.g., 'claude-3-opus', 'llama-3.1-405b')
-    - Direct OpenAI models (e.g., 'gpt-4', 'gpt-5')
-    - Direct Anthropic models (e.g., 'claude-3-opus-20240229')
+    Supports all OpenRouter models including:
+    - OpenAI models (e.g., 'gpt-5', 'gpt-4')
+    - Anthropic models (e.g., 'claude-3-opus')
+    - Other providers (e.g., 'meta/llama-3', 'google/gemini-pro')
     """
     
-    # Try OpenRouter first if not explicitly OpenAI/Anthropic
-    if not model_name.startswith('openai/') and not model_name.startswith('anthropic/'):
-        # Check if OpenRouter is available
-        openrouter_key = os.getenv('OPENROUTER_API_KEY')
-        if openrouter_key:
-            try:
-                from openrouter_config import setup_openrouter_model
-                lm = setup_openrouter_model(model_name, openrouter_key)
-                dspy.settings.configure(lm=lm)
-                console.print("[dim]Logging all learning and changes...[/dim]")
-                return
-            except Exception as e:
-                console.print(f"[yellow]OpenRouter setup failed: {e}[/yellow]")
-                console.print("[cyan]Falling back to direct provider...[/cyan]")
-    
-    # DSPy 3.0+ syntax for direct providers
-    if 'gpt' in model_name.lower():
-        api_key = os.getenv('OPENAI_API_KEY')
-        # Handle GPT models - GPT-5 needs special parameters [[memory:7215547]]
-        if '5' in model_name or model_name == 'gpt-5':
-            # GPT-5 is a reasoning model requiring temperature=1.0 and max_tokens>=20000
-            lm = dspy.LM('openai/gpt-5', api_key=api_key, temperature=1.0, max_tokens=20000)
-            console.print("[cyan]Using GPT-5 reasoning model as configured[/cyan]")
-        elif '4' in model_name or model_name == 'gpt-4':
-            lm = dspy.LM('openai/gpt-4', api_key=api_key, max_tokens=500)
-            console.print("[cyan]Using GPT-4 model[/cyan]")
-        else:
-            # Map model names to DSPy format
-            if model_name == 'gpt-3.5-turbo':
-                lm = dspy.LM('openai/gpt-3.5-turbo', api_key=api_key, max_tokens=500)
-            else:
-                lm = dspy.LM(f'openai/{model_name}', api_key=api_key, max_tokens=500)
-    elif 'claude' in model_name.lower():
-        api_key = os.getenv('ANTHROPIC_API_KEY')
-        # Map Claude models to DSPy format
-        lm = dspy.LM(f'anthropic/{model_name}', api_key=api_key)
-    else:
-        # Default to gpt-5 per user preference
-        api_key = os.getenv('OPENAI_API_KEY')
-        lm = dspy.LM('openai/gpt-5', api_key=api_key, temperature=1.0, max_tokens=20000)
-        console.print("[cyan]Defaulting to GPT-5[/cyan]")
-    
-    dspy.settings.configure(lm=lm)
-    console.print("[dim]Logging all learning and changes...[/dim]")
+    try:
+        from openrouter_config import setup_openrouter_model
+        
+        # If model doesn't have provider prefix, add openai/ for compatibility
+        if not any(model_name.startswith(p) for p in ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/']):
+            model_name = f"openai/{model_name}"
+        
+        lm = setup_openrouter_model(model_name)
+        dspy.settings.configure(lm=lm)
+        console.print(f"[green]Using OpenRouter model: {model_name}[/green]")
+        console.print("[dim]Logging all learning and changes...[/dim]")
+    except Exception as e:
+        console.print(f"[red]OpenRouter setup failed: {e}[/red]")
+        raise
 
 def analyze_dataset(config: Dict):
     """Analyze the tweet dataset"""
