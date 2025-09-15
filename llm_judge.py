@@ -4,34 +4,40 @@ import json
 import re
 
 class TweetJudgeSignature(dspy.Signature):
-    """You are a humor + virality critic. 
-Evaluate a candidate tweet against the original tweet + media context.
+    """You are a cognitive analysis expert evaluating tweet generation quality.
+
+You will evaluate how well a generated tweet demonstrates the strategic thinking, audience psychology, 
+and engagement mechanics shown in expert cognitive analysis examples.
 
 Check first:
 - If the model did not output a valid tweet (empty, meta-text, instructions, or commentary instead of a tweet), assign a score of 0 and return feedback: "No tweet generated."
 
 If a valid tweet is present, score each criterion on 0–1:
-1. Information Coverage — captures the *gist* of the context without parroting.
-2. Style Match — aligns with viral tweet patterns (brevity, cadence, rhetorical punch).
-3. Originality — introduces a unique twist; penalize if it mimics the source.
-4. Engagement Potential — likely to get replies, likes, or reposts.
-5. Humor / Surprise — delivers wit, absurdity, or an emotional hook.
-6. Cultural Evaluator (0–1 each)
-Judge cultural grounding with these axes:
 
-	•	Cultural Fluency — Uses references, tone, and norms naturally.
-	•	Meme Lineage Alignment — Riffs appropriately on existing meme formats/phrases.
-	•	Locale Shibboleths Usage — Employs insider slang, jargon, or fan idioms.
-	•	Cross-Subculture Resonance — Likely to resonate beyond niche communities.
+1. Strategic Understanding (0-1) — Shows awareness of the strategic angle and positioning from the analysis
+2. Audience Psychology (0-1) — Demonstrates understanding of target audience and their motivations  
+3. Engagement Mechanics (0-1) — Uses proven engagement tactics (hooks, emotional triggers, social proof)
+4. Cultural Fluency (0-1) — Shows cultural awareness and relevance from the cognitive insights
+5. Execution Quality (0-1) — Well-crafted, clear, concise, under 280 characters
+
+The cognitive analysis examples show expert-level thinking about:
+- How to identify and leverage cultural context and trends
+- Understanding audience psychology and motivations
+- Strategic positioning and angle selection
+- Engagement optimization techniques
+- Risk assessment and controversy management
+
+Evaluate how well the generated tweet embodies these cognitive insights.
+
 Rules:
-- Penalize blandness or over-explanation.
-- Penalize copying content; reward fresh spins.
-- Bonus if funny, deadpan, or ironic.
-- Favor concise rhythm (short clauses, punchy beats).
+- Reward tweets that show strategic thinking beyond surface-level content
+- Favor tweets that demonstrate audience awareness and psychological insight
+- Bonus for tweets that show cultural fluency and trend awareness
+- Penalize generic or formulaic responses that miss the strategic depth
 
 Return:
 - JSON with criterion scores and final average `score` (0–1). If invalid, return 0.
-- 2–3 sentences of feedback on what worked and what to improve.
+- 2–3 sentences of feedback on cognitive alignment and strategic thinking quality.
     """
     
     information_sources: str = dspy.InputField(
@@ -74,8 +80,8 @@ class LLMJudge(dspy.Module):
         
         # Calculate overall score if not present
         if 'overall' not in evaluation:
-            scores = [v.get('score', 5) for k, v in evaluation.items() if isinstance(v, dict) and 'score' in v]
-            overall_score = sum(scores) / len(scores) if scores else 5
+            scores = [v.get('score', 0.5) for k, v in evaluation.items() if isinstance(v, dict) and 'score' in v]
+            overall_score = sum(scores) / len(scores) if scores else 0.5
             evaluation['overall'] = {'score': overall_score, 'reasoning': 'Averaged from component scores'}
         
         return dspy.Prediction(
@@ -84,13 +90,14 @@ class LLMJudge(dspy.Module):
         )
     
     def _create_default_evaluation(self):
-        """Create default evaluation structure"""
+        """Create default evaluation structure for cognitive analysis"""
         return {
-            'information_coverage': {'score': 5, 'reasoning': 'Unable to evaluate'},
-            'style_match': {'score': 5, 'reasoning': 'Unable to evaluate'},
-            'originality': {'score': 5, 'reasoning': 'Unable to evaluate'},
-            'engagement_potential': {'score': 5, 'reasoning': 'Unable to evaluate'},
-            'overall': {'score': 5, 'reasoning': 'Default evaluation due to parsing error'}
+            'strategic_understanding': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
+            'audience_psychology': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
+            'engagement_mechanics': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
+            'cultural_fluency': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
+            'execution_quality': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
+            'overall': {'score': 0.5, 'reasoning': 'Default evaluation due to parsing error'}
         }
 
 class ComparativeJudge(dspy.Module):

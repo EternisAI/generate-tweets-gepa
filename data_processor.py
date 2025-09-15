@@ -64,31 +64,81 @@ class DataProcessor:
         skipped_count = 0
         for i, item in enumerate(raw_data):
             try:
-                # Required fields
-                if 'tweet' not in item:
-                    print(f"[DataProcessor] Skipping row {i}: missing 'tweet' field")
-                    skipped_count += 1
-                    continue
-                
-                # Create tweet with safe field access
-                tweet = TweetData(
-                    tweet=item.get('tweet', ''),
-                    username=item.get('username', 'unknown'),
-                    created_at=item.get('created_at', ''),
-                    retweets=item.get('retweets', 0),
-                    replies=item.get('replies', 0),
-                    likes=item.get('likes', 0),
-                    quotes=item.get('quotes', 0),
-                    information=item.get('information', []),
-                    media_analysis=item.get('media_analysis')  # Include media analysis if present
-                )
-                self.tweets.append(tweet)
+                # Handle converted dataset format with <think> tags
+                if 'tweet' in item and '<think>' in item.get('tweet', ''):
+                    # This is the converted format - extract the generated tweet
+                    tweet_text, information_context = self._extract_from_think_format(item)
+                    if not tweet_text:
+                        skipped_count += 1
+                        continue
+                    
+                    # Create tweet with extracted data
+                    tweet = TweetData(
+                        tweet=tweet_text,
+                        username=item.get('username', 'unknown'),
+                        created_at=item.get('created_at', ''),
+                        retweets=item.get('retweets', 0),
+                        replies=0,  # Not available in converted format
+                        likes=item.get('likes', 0),
+                        quotes=0,   # Not available in converted format
+                        information=[information_context] if information_context else [],
+                        media_analysis=None
+                    )
+                    self.tweets.append(tweet)
+                    
+                else:
+                    # Original format
+                    if 'tweet' not in item:
+                        print(f"[DataProcessor] Skipping row {i}: missing 'tweet' field")
+                        skipped_count += 1
+                        continue
+                    
+                    # Create tweet with safe field access
+                    tweet = TweetData(
+                        tweet=item.get('tweet', ''),
+                        username=item.get('username', 'unknown'),
+                        created_at=item.get('created_at', ''),
+                        retweets=item.get('retweets', 0),
+                        replies=item.get('replies', 0),
+                        likes=item.get('likes', 0),
+                        quotes=item.get('quotes', 0),
+                        information=item.get('information', []),
+                        media_analysis=item.get('media_analysis')  # Include media analysis if present
+                    )
+                    self.tweets.append(tweet)
+                    
             except Exception as e:
                 print(f"[DataProcessor] Error loading row {i}: {e}")
                 skipped_count += 1
         
         if skipped_count > 0:
             print(f"[DataProcessor] Skipped {skipped_count} rows with missing/invalid data")
+    
+    def _extract_from_think_format(self, item: dict) -> tuple:
+        """Extract generated tweet and information from converted format with <think> tags"""
+        import re
+        import json
+        
+        tweet_text = item.get('tweet', '')
+        information_context = item.get('information', '')
+        
+        # Extract the JSON part after </think>
+        think_match = re.search(r'<think>.*?</think>', tweet_text, re.DOTALL)
+        if think_match:
+            remaining_text = tweet_text[think_match.end():].strip()
+            
+            try:
+                # Try to parse the JSON
+                tweet_json = json.loads(remaining_text)
+                generated_tweet = tweet_json.get('generated_tweet', '')
+                return generated_tweet, information_context
+            except json.JSONDecodeError:
+                # Fallback: look for "generated_tweet" in the text
+                tweet_match = re.search(r'"generated_tweet":\s*"([^"]*)"', remaining_text)
+                if tweet_match:
+                    return tweet_match.group(1), information_context
+        
+        return "", information_context
     
     def get_high_engagement_tweets(self, top_k: int = None, min_engagement: float = 100):
         """Get tweets with high engagement scores"""

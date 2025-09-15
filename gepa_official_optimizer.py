@@ -17,6 +17,7 @@ except ImportError:
 from typing import Dict, List, Optional, Any
 import json
 import numpy as np
+import concurrent.futures
 from datetime import datetime
 from rich.console import Console
 
@@ -33,53 +34,93 @@ except ImportError:
             raise NotImplementedError("Subclasses must implement __call__")
 
 class TweetGenerationMetric(GEPAFeedbackMetric if 'GEPAFeedbackMetric' in locals() else object):
-    """GEPA-compatible metric for tweet generation evaluation"""
+    """GEPA-compatible metric for tweet generation evaluation with variant support"""
     
     def __init__(self, judge_lm=None):
         """Initialize the metric with an optional judge LM"""
         self.judge_lm = judge_lm or dspy.settings.lm
+        
+        # Track best variants
+        self.best_variants = {}  # {task_id: [(score, variant_id, tweet)]}
+        
+        # Configure thread pool for parallel evaluation
+        import concurrent.futures
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        
         # Define evaluation signature class
         class TweetEvaluationSignature(dspy.Signature):
-            """You are a humor + virality critic. 
-Evaluate a candidate tweet against the original tweet + media context.
+            """You are a humor + virality critic with expertise in engagement analytics.
+Evaluate a candidate tweet against the original tweet + media context, accounting for temporal and audience factors.
 
 Check first:
 - If the model did not output a valid tweet (empty, meta-text, instructions, or commentary instead of a tweet), assign a score of 0 and return feedback: "No tweet generated."
 
 If a valid tweet is present, score each criterion on 0–1:
-1. Information Coverage — captures the *gist* of the context without parroting.
-2. Style Match — aligns with viral tweet patterns (brevity, cadence, rhetorical punch).
-3. Originality — introduces a unique twist; penalize if it mimics the source.
-4. Engagement Potential — likely to get replies, likes, or reposts.
-5. Humor / Surprise — delivers wit, absurdity, or an emotional hook.
-6. Cultural Evaluator (0–1 each)
-Judge cultural grounding with these axes:
 
-	•	Cultural Fluency — Uses references, tone, and norms naturally.
-	•	Meme Lineage Alignment — Riffs appropriately on existing meme formats/phrases.
-	•	Locale Shibboleths Usage — Employs insider slang, jargon, or fan idioms.
-	•	Cross-Subculture Resonance — Likely to resonate beyond niche communities.
+1. Content Quality (0-1):
+   - Information Coverage — captures key insights without verbatim copying
+   - Originality — introduces unique perspective or angle
+   - Clarity — message is clear and well-structured
+
+2. Engagement Optimization (0-1):
+   - Time-of-Day Alignment — matches optimal posting windows
+   - Audience Targeting — appeals to core demographic segments
+   - Call-to-Action — encourages interaction naturally
+
+3. Viral Mechanics (0-1):
+   - Hook Strength — compelling opening that stops scrolling
+   - Share-worthiness — readers likely to repost/quote
+   - Discussion Potential — sparks conversation threads
+
+4. Cultural Resonance (0-1):
+   - Trend Alignment — fits current conversation climate
+   - Reference Fluency — uses cultural touchstones effectively
+   - Cross-Community Appeal — bridges multiple audience segments
+
+5. Technical Optimization (0-1):
+   - Length Optimization — uses space efficiently
+   - Format Optimization — leverages platform features
+   - Rich Media Hooks — references visuals/links effectively
+
+Normalization Factors:
+- Time Decay: Weight recent engagement patterns more heavily
+- Impression Normalization: Adjust metrics by audience reach
+- Audience Overlap: Account for community cross-pollination
+- Platform Velocity: Factor in current platform activity levels
+
 Rules:
-- Penalize blandness or over-explanation.
-- Penalize copying content; reward fresh spins.
-- Bonus if funny, deadpan, or ironic.
-- Favor concise rhythm (short clauses, punchy beats).
+- Normalize engagement expectations by time-of-day
+- Account for audience size and overlap
+- Consider platform-specific engagement patterns
+- Evaluate share/reply ratio potential
+- Factor in current trending topics and memes
 
 Return:
-- JSON with criterion scores and final average `score` (0–1). If invalid, return 0.
-- 2–3 sentences of feedback on what worked and what to improve."""
+- JSON with normalized criterion scores and final score (0–1)
+- Feedback on optimization opportunities
+- Specific suggestions for timing and audience targeting"""
             
+            # Input fields
             information_sources = dspy.InputField(desc="Source information")
             generated_tweet = dspy.InputField(desc="Generated tweet")
             original_tweet = dspy.InputField(desc="Original viral tweet")
-            score = dspy.OutputField(desc="Score between 0 and 1")
+            
+            # Engagement context fields
+            post_time = dspy.InputField(desc="Target posting time (HH:MM format)")
+            audience_size = dspy.InputField(desc="Estimated audience size")
+            platform_activity = dspy.InputField(desc="Current platform activity level (0-1)")
+            trending_topics = dspy.InputField(desc="Current trending topics and hashtags")
+            
+            # Output fields
+            score = dspy.OutputField(desc="Normalized score between 0 and 1")
             feedback = dspy.OutputField(desc="Detailed feedback for improvement")
+            timing_guidance = dspy.OutputField(desc="Specific timing and audience targeting suggestions")
         
         self.evaluation_prompt = TweetEvaluationSignature
         self.evaluator = dspy.Predict(self.evaluation_prompt)
         print("[TweetGenerationMetric] Initialized GEPA-compatible metric")
     
-    def __call__(self, gold, pred, trace=None, pred_name=None, pred_trace=None) -> dspy.Prediction:
+    def __call__(self, gold, pred, trace=None, pred_name=None, pred_trace=None) -> float:
         """Evaluate a generated tweet and return score + feedback
         
         Args:
@@ -90,26 +131,32 @@ Return:
             pred_trace: Predictor trace (for GEPA)
         
         Returns:
-            dspy.Prediction with score (0-1) and feedback string
+            float score between 0 and 1
         """
         
-        # Handle different input types for gold (example)
-        if hasattr(gold, '__getitem__') and hasattr(gold, 'get'):
-            # DSPy Example or dictionary-like
-            information_context = gold.get('information_context', gold.get('inputs', {}).get('information_context', ''))
-            original_tweet = gold.get('original_tweet', '')
-        elif hasattr(gold, 'information_context'):
-            # Object with attributes
-            information_context = gold.information_context
-            original_tweet = getattr(gold, 'original_tweet', '')
+        # Extract fields using getattr with consistent fallbacks
+        information_context = ''
+        original_tweet = ''
+        
+        # First try direct attribute access
+        if hasattr(gold, 'information_context'):
+            information_context = getattr(gold, 'information_context')
         elif hasattr(gold, 'inputs'):
-            # DSPy Example with inputs
-            information_context = gold.inputs.get('information_context', '')
-            original_tweet = getattr(gold, 'original_tweet', '')
+            # Try inputs.information_context
+            inputs = getattr(gold, 'inputs')
+            if hasattr(inputs, 'information_context'):
+                information_context = getattr(inputs, 'information_context')
+            elif isinstance(inputs, dict):
+                information_context = inputs.get('information_context', '')
+        elif isinstance(gold, dict):
+            # Handle dictionary input
+            information_context = gold.get('information_context', gold.get('inputs', {}).get('information_context', ''))
         else:
-            # Fallback
+            # Last resort fallback
             information_context = str(gold)
-            original_tweet = ''
+            
+        # Get original tweet with getattr
+        original_tweet = getattr(gold, 'original_tweet', '')
         
         # Extract the generated tweet from prediction
         if hasattr(pred, 'generated_tweet'):
@@ -130,23 +177,65 @@ Return:
             if not generated_tweet:
                 print(f"[GEPA Metric] Warning: Empty generated tweet")
             
+            # Get current time and platform context
+            from datetime import datetime
+            current_time = datetime.now().strftime("%H:%M")
+            
+            # Get engagement context from gold example if available
+            audience_size = getattr(gold, 'audience_size', '100000')  # Default audience size
+            platform_activity = getattr(gold, 'platform_activity', '0.5')  # Default activity
+            trending_topics = getattr(gold, 'trending_topics', '')  # Default empty
+            
+            # Evaluate with engagement context
             with dspy.context(lm=self.judge_lm):
                 evaluation = self.evaluator(
                     information_sources=information_context,
                     generated_tweet=generated_tweet,
-                    original_tweet=original_tweet
+                    original_tweet=original_tweet,
+                    post_time=current_time,
+                    audience_size=str(audience_size),
+                    platform_activity=str(platform_activity),
+                    trending_topics=trending_topics
                 )
             
-            # Parse score
+            # Parse normalized score
             try:
-                score = float(evaluation.score)
-                # Ensure score is between 0 and 1
+                raw_score = float(evaluation.score)
+                
+                # Apply time-of-day normalization
+                hour = int(current_time.split(":")[0])
+                # Higher weights during peak hours (8-22)
+                time_factor = 1.0 if 8 <= hour <= 22 else 0.7
+                
+                # Apply audience size normalization
+                try:
+                    audience = float(audience_size)
+                    # Log scale normalization
+                    import math
+                    audience_factor = min(1.0, math.log10(audience) / math.log10(1000000))
+                except:
+                    audience_factor = 0.5
+                
+                # Apply platform activity normalization
+                try:
+                    activity = float(platform_activity)
+                    activity_factor = min(1.0, max(0.1, activity))
+                except:
+                    activity_factor = 0.5
+                
+                # Combine normalizations
+                score = raw_score * time_factor * audience_factor * activity_factor
+                
+                # Ensure final score is between 0 and 1
                 score = max(0.0, min(1.0, score))
+                
             except (ValueError, TypeError):
                 score = 0.5  # Default mid-range score
             
-            # Format feedback
+            # Format feedback with timing guidance
             feedback = evaluation.feedback
+            if hasattr(evaluation, 'timing_guidance'):
+                feedback += f"\n\nTiming Guidance: {evaluation.timing_guidance}"
             
             # Add specific insights based on common issues
             if score < 0.5:
@@ -158,17 +247,147 @@ Return:
                 if "engagement" in feedback.lower():
                     feedback += "\n- Start with a compelling hook"
             
-            # Log everything as per user preference
-            print(f"[GEPA Metric] Score: {score:.3f} | Feedback: {feedback[:100]}...")
+            # Get module score if available
+            module_score = None
+            if pred_trace and isinstance(pred_trace, dict):
+                module_score = pred_trace.get('score')
             
-            return dspy.Prediction(score=score, feedback=feedback)
+            # Use module score if available, otherwise use our computed score
+            final_score = module_score if module_score is not None else score
+            
+            # Create feedback object compatible with GEPA
+            feedback_obj = dspy.Prediction(
+                score=final_score,
+                feedback=feedback,
+                normalized_score=score,  # Keep original score for reference
+                computed_score=score  # Store our computed score
+            )
+            
+            # Store feedback in trace if available and it's a dict
+            if trace is not None and isinstance(trace, dict):
+                trace.update({
+                    'score': final_score,
+                    'feedback': feedback,
+                    'normalized_score': score,
+                    'computed_score': score
+                })
+            elif trace is not None:
+                print(f"[GEPA Metric] Warning: trace must be a dict to store feedback")
+            
+            # Log everything as per user preference
+            print(f"[GEPA Metric] Score: {final_score:.3f} (computed: {score:.3f}) | Feedback: {feedback[:100]}...")
+            
+            return feedback_obj
         
         except Exception as e:
             print(f"[GEPA Metric] Error during evaluation: {e}")
-            return dspy.Prediction(
-                score=0.0,
-                feedback=f"Evaluation failed: {str(e)}. Consider improving tweet structure."
+            error_feedback = f"Evaluation failed: {str(e)}. Consider improving tweet structure."
+            
+            # Get module score if available
+            module_score = None
+            if pred_trace and isinstance(pred_trace, dict):
+                module_score = pred_trace.get('score', 0.0)
+            
+            # Use module score if available, otherwise use 0.0
+            final_score = module_score if module_score is not None else 0.0
+            
+            # Create error feedback object
+            error_obj = dspy.Prediction(
+                score=final_score,
+                feedback=error_feedback,
+                normalized_score=0.0,
+                computed_score=0.0
             )
+            
+            # Store error feedback in trace
+            if trace is not None and isinstance(trace, dict):
+                trace.update({
+                    'score': final_score,
+                    'feedback': error_feedback,
+                    'normalized_score': 0.0,
+                    'computed_score': 0.0
+                })
+            
+            return error_obj
+        
+    def __del__(self):
+        """Cleanup thread pool on deletion"""
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception as e:
+            print(f"[TweetGenerationMetric] Warning: Error during thread pool shutdown: {e}")
+            pass
+    
+    def score_variants(self, gold, variants, task_id=None):
+        """Score multiple tweet variants and track the best ones
+        
+        Args:
+            gold: Input example with context
+            variants: List of variant dicts with 'tweet' and 'variant_id'
+            task_id: Optional identifier for tracking best variants
+            
+        Returns:
+            List of (score, variant_id, tweet) tuples, sorted by score
+        """
+        scores = []
+        futures = []
+        
+        def score_single_variant(variant):
+            """Helper function to score a single variant"""
+            tweet = variant['tweet']
+            variant_id = variant.get('variant_id', 'v0')
+            
+            # Create prediction object
+            pred = dspy.Prediction(generated_tweet=tweet)
+            
+            try:
+                # Score the variant
+                result = self(gold, pred)
+                # Extract numeric score from the feedback object
+                score = float(result.score) if hasattr(result, 'score') else 0.0
+                return score, variant_id, tweet
+            except Exception as e:
+                print(f"[TweetGenerationMetric] Failed to score variant {variant_id}: {e}")
+                return 0.0, variant_id, tweet
+        
+        try:
+            # Submit scoring tasks to thread pool
+            for variant in variants:
+                future = self._executor.submit(score_single_variant, variant)
+                futures.append(future)
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    score, variant_id, tweet = future.result()
+                    scores.append((score, variant_id, tweet))
+                except Exception as e:
+                    print(f"[TweetGenerationMetric] Error collecting variant score: {e}")
+                    continue
+            
+        except Exception as e:
+            print(f"[TweetGenerationMetric] Error during parallel scoring: {e}")
+            # Fallback to sequential scoring
+            for variant in variants:
+                result = score_single_variant(variant)
+                scores.append(result)
+        
+        # Sort by score descending
+        scores.sort(reverse=True)
+        
+        # Track best variants if task_id provided
+        if task_id is not None:
+            self.best_variants[task_id] = scores
+            
+            # Log best variant
+            if scores:
+                best_score, best_id, best_tweet = scores[0]
+                print(f"[TweetGenerationMetric] Best variant for task {task_id}:")
+                print(f"  Score: {best_score:.3f}")
+                print(f"  ID: {best_id}")
+                print(f"  Tweet: {best_tweet[:100]}...")
+        
+        return scores
 
 class TweetGenerationSignature(dspy.Signature):
     """Signature for tweet generation from information sources and media analysis"""
@@ -181,25 +400,204 @@ class TweetGenerationSignature(dspy.Signature):
     )
 
 class TweetGeneratorModule(dspy.Module):
-    """DSPy module for tweet generation compatible with GEPA"""
+    """DSPy module for tweet generation compatible with GEPA with structured generation"""
     
-    def __init__(self):
+    # Define available hook styles
+    HOOK_STYLES = {
+        'question': 'Start with an intriguing question',
+        'statistic': 'Lead with a surprising statistic or number',
+        'contrast': 'Present a striking contrast or contradiction',
+        'challenge': 'Challenge a common assumption',
+        'quote': 'Begin with a relevant quote or statement',
+        'scenario': 'Paint a brief scenario or situation'
+    }
+    
+    # Define tweet structure templates
+    STRUCTURES = {
+        'hook_evidence_punchline': 'Start with a hook, present key evidence, end with impact',
+        'claim_support_call': 'Make a claim, support it, call to action',
+        'problem_solution_twist': 'Present problem, offer solution, add unexpected twist',
+        'setup_context_reveal': 'Set up context, build tension, reveal insight',
+        'compare_contrast_conclude': 'Compare perspectives, highlight contrast, conclude'
+    }
+    
+    def __init__(self, 
+                 hook_style: str = None,
+                 structure: str = None,
+                 evidence_density: float = 0.5,
+                 num_candidates: int = 3,
+                 temperature: float = 0.7,
+                 seed: int = 42):
+        """Initialize tweet generator with structured parameters
+        
+        Args:
+            hook_style: Style of opening hook (from HOOK_STYLES)
+            structure: Tweet structure template (from STRUCTURES)
+            evidence_density: How much evidence to include (0.0-1.0)
+            num_candidates: Number of candidates to generate
+            temperature: Generation temperature for variety
+            seed: Random seed for deterministic generation
+        """
         super().__init__()
-        self.generate = dspy.ChainOfThought(TweetGenerationSignature)
+        
+        # Store generation parameters
+        self.hook_style = hook_style
+        self.structure = structure
+        self.evidence_density = max(0.0, min(1.0, evidence_density))
+        self.num_candidates = max(1, num_candidates)
+        self.temperature = temperature
+        self.seed = seed
+        
+        # Set random seed for determinism
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
+        
+        # Initialize generation stats
+        self.generation_stats = {
+            'total_generations': 0,
+            'total_variants': 0,
+            'parameter_history': []
+        }
+        
+        # Create signature with structured guidance
+        class StructuredTweetSignature(TweetGenerationSignature):
+            """Enhanced signature with structural guidance"""
+            
+            # Add fields for generation guidance
+            hook_guidance = dspy.InputField(desc="Style guidance for the opening hook")
+            structure_template = dspy.InputField(desc="Overall tweet structure template")
+            evidence_guidance = dspy.InputField(desc="Guidance on evidence density")
+        
+        self.generate = dspy.ChainOfThought(StructuredTweetSignature)
+        
+        # Log configuration
+        print(f"[TweetGenerator] Initialized with:")
+        print(f"  Hook style: {hook_style or 'default'}")
+        print(f"  Structure: {structure or 'default'}")
+        print(f"  Evidence density: {evidence_density:.2f}")
+        print(f"  Candidates: {num_candidates}")
+    
+    def _prepare_guidance(self):
+        """Prepare structured guidance for generation"""
+        
+        # Format hook guidance
+        if self.hook_style and self.hook_style in self.HOOK_STYLES:
+            hook_guidance = f"Hook style: {self.HOOK_STYLES[self.hook_style]}"
+        else:
+            hook_guidance = "Use an engaging opening hook"
+        
+        # Format structure guidance
+        if self.structure and self.structure in self.STRUCTURES:
+            structure_guidance = f"Structure: {self.STRUCTURES[self.structure]}"
+        else:
+            structure_guidance = "Use a clear and engaging structure"
+        
+        # Format evidence guidance based on density
+        if self.evidence_density <= 0.3:
+            evidence_guidance = "Focus on high-level insights, minimal raw evidence"
+        elif self.evidence_density <= 0.7:
+            evidence_guidance = "Balance key evidence with engaging presentation"
+        else:
+            evidence_guidance = "Include detailed evidence and supporting facts"
+        
+        return hook_guidance, structure_guidance, evidence_guidance
     
     def forward(self, information_context):
-        """Generate a tweet from information context"""
-        result = self.generate(information_context=information_context)
+        """Generate multiple tweet candidates with structured guidance"""
         
-        # Ensure 280 character limit
-        tweet = result.generated_tweet
-        if len(tweet) > 280:
-            tweet = tweet[:277] + "..."
+        # Prepare structural guidance
+        hook_guidance, structure_guidance, evidence_guidance = self._prepare_guidance()
         
-        return dspy.Prediction(generated_tweet=tweet)
+        # Set deterministic seed for this generation
+        import random
+        import numpy as np
+        generation_seed = self.seed + self.generation_stats['total_generations']
+        random.seed(generation_seed)
+        np.random.seed(generation_seed)
+        
+        candidates = []
+        for i in range(self.num_candidates):
+            # Set variant-specific seed
+            variant_seed = generation_seed + i
+            random.seed(variant_seed)
+            np.random.seed(variant_seed)
+            
+            # Generate with structural guidance
+            with dspy.settings.context(temperature=self.temperature):
+                result = self.generate(
+                    information_context=information_context,
+                    hook_guidance=hook_guidance,
+                    structure_template=structure_guidance,
+                    evidence_guidance=evidence_guidance
+                )
+            
+            # Ensure 280 character limit
+            tweet = result.generated_tweet
+            if len(tweet) > 280:
+                tweet = tweet[:277] + "..."
+            
+            # Create variant with detailed metadata
+            variant = {
+                'tweet': tweet,
+                'variant_id': f"v{i+1}",
+                'params': {
+                    'hook_style': self.hook_style,
+                    'structure': self.structure,
+                    'evidence_density': self.evidence_density,
+                    'temperature': self.temperature,
+                    'generation_seed': generation_seed,
+                    'variant_seed': variant_seed
+                }
+            }
+            candidates.append(variant)
+            
+            # Track variant stats
+            self.generation_stats['total_variants'] += 1
+        
+        # Update generation stats
+        self.generation_stats['total_generations'] += 1
+        self.generation_stats['parameter_history'].append({
+            'generation_id': self.generation_stats['total_generations'],
+            'generation_seed': generation_seed,
+            'num_variants': len(candidates),
+            'hook_style': self.hook_style,
+            'structure': self.structure,
+            'evidence_density': self.evidence_density,
+            'temperature': self.temperature
+        })
+        
+        # Log generation stats
+        print(f"\n[TweetGenerator] Generation {self.generation_stats['total_generations']}:")
+        print(f"  Seed: {generation_seed}")
+        print(f"  Variants: {len(candidates)}")
+        print(f"  Total variants generated: {self.generation_stats['total_variants']}")
+        
+        # Return all candidates
+        return dspy.Prediction(
+            generated_tweet=candidates[0]['tweet'],  # Primary candidate
+            all_candidates=candidates,  # All variants
+            generation_stats=self.generation_stats  # Include stats
+        )
 
 class GEPATweetOptimizer:
-    """Wrapper for official DSPy GEPA optimizer for tweet generation"""
+    """Wrapper for official DSPy GEPA optimizer for tweet generation
+    
+    This optimizer uses GEPA (Guided Evolution with Prompt Adaptation) to evolve and optimize
+    prompts for tweet generation. It includes features for tracking and saving intermediate
+    prompts during the optimization process.
+    
+    Key Features:
+    - Tracks and saves intermediate best prompts during optimization
+    - Maintains a history of prompt evolution with scores and timestamps
+    - Generates a summary of all intermediate prompts at the end
+    - Saves prompts in an 'intermediate_prompts' directory within the log directory
+    
+    The intermediate prompts are saved whenever a new best score is achieved, allowing you
+    to analyze the evolution of the prompt and potentially choose from different versions
+    based on your specific needs.
+    """
     
     def __init__(self, judge_lm=None, reflection_lm=None):
         """
@@ -251,6 +649,10 @@ class GEPATweetOptimizer:
         """
         Optimize the tweet generation module using GEPA
         
+        This method runs the GEPA optimization process, evolving the prompt to improve
+        tweet generation performance. During optimization, it saves intermediate prompts
+        whenever a new best score is achieved.
+        
         Args:
             student_module: DSPy module to optimize
             trainset: Training examples
@@ -259,10 +661,18 @@ class GEPATweetOptimizer:
             max_metric_calls: Maximum metric calls
             auto: Automatic configuration ('light', 'medium', 'heavy')
             track_stats: Whether to track detailed statistics
-            log_dir: Directory for logs
+            log_dir: Directory for logs. Will contain:
+                    - optimized_prompt.txt: Final best prompt
+                    - intermediate_prompts/: Directory containing:
+                        - prompt_[timestamp]_score_[score].txt: Individual prompt files
+                        - summary.txt: Overview of all intermediate prompts
         
         Returns:
             Optimized DSPy module
+            
+        The intermediate prompts are saved in the log_dir/intermediate_prompts directory,
+        with each file containing the prompt text, score, and improvement metrics. A
+        summary file is also generated listing all intermediate prompts sorted by score.
         """
         
         # Convert data to DSPy Example format if needed
@@ -277,83 +687,65 @@ class GEPATweetOptimizer:
         else:
             valset = self._prepare_dataset(valset)
         
-        # Configure GEPA optimizer
+        # Configure GEPA optimizer with version-safe core parameters
         print(f"\n[GEPATweetOptimizer] Starting GEPA optimization")
         
-        # Initialize official GEPA - use ONLY ONE of auto/max_metric_calls/max_full_evals
+        # Define core configuration that works across versions
+        core_config = {
+            'metric': self.metric,
+            'seed': 42,  # Always set for determinism
+            'log_dir': log_dir or f"gepa_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            'track_stats': track_stats
+        }
+        
+        # Add optimization mode parameters
+        if auto:
+            core_config['auto'] = auto
+            print(f"[GEPATweetOptimizer] Mode: {auto} (auto-configured)")
+        elif max_metric_calls:
+            core_config['max_metric_calls'] = max_metric_calls
+            print(f"[GEPATweetOptimizer] Max metric calls: {max_metric_calls}")
+        else:
+            dataset_size = len(trainset) + len(valset)
+            core_config['max_full_evals'] = max_generations
+            print(f"[GEPATweetOptimizer] Using explicit generation limit: {max_generations} full evaluations")
+            print(f"[GEPATweetOptimizer] This will run approximately {max_generations * dataset_size} metric calls")
+        
+        # Try to create GEPA with advanced features first
         try:
-            if auto:
-                # Use auto mode (preferred)
-                print(f"[GEPATweetOptimizer] Mode: {auto} (auto-configured)")
+            advanced_config = {
+                **core_config,
+                'reflection_minibatch_size': 3,
+                'candidate_selection_strategy': 'pareto',
+                'reflection_lm': self.reflection_lm,
+                'skip_perfect_score': True,
+                'add_format_failure_as_feedback': True,
+                'use_merge': True,
+                'max_merge_invocations': 5,
+                'failure_score': 0.0,
+                'perfect_score': 1.0,
+                'track_best_outputs': True
+            }
+            
+            # Try creating with advanced config
+            gepa_optimizer = GEPA(**advanced_config)
+            print("[GEPATweetOptimizer] Using advanced GEPA configuration with Pareto selection and merging")
+            
+        except (TypeError, ValueError) as e:
+            # Fall back to core config if advanced features aren't supported
+            print(f"[GEPATweetOptimizer] Advanced features not supported, using core configuration: {str(e)}")
+            try:
+                gepa_optimizer = GEPA(**core_config)
+                print("[GEPATweetOptimizer] Using core GEPA configuration")
+            except (TypeError, ValueError) as e2:
+                # Ultimate fallback for very old versions
+                console.print(f"[yellow]Using legacy compatibility mode for GEPA: {e2}[/yellow]")
                 gepa_optimizer = GEPA(
                     metric=self.metric,
-                    auto=auto,
-                    reflection_minibatch_size=3,
-                    candidate_selection_strategy='pareto',  # Use Pareto frontier
-                    reflection_lm=self.reflection_lm,
-                    skip_perfect_score=True,
-                    add_format_failure_as_feedback=True,
-                    use_merge=True,  # Enable crossover between candidates
-                    max_merge_invocations=5,
-                    failure_score=0.0,
-                    perfect_score=1.0,
-                    log_dir=log_dir or f"gepa_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    track_stats=track_stats,
-                    track_best_outputs=True,  # Track best outputs for each instance
-                    seed=42
+                    max_bootstrapped_demos=max_generations,
+                    max_labeled_demos=max_generations,
+                    num_candidates=3
                 )
-            elif max_metric_calls:
-                # Use metric calls limit
-                print(f"[GEPATweetOptimizer] Max metric calls: {max_metric_calls}")
-                gepa_optimizer = GEPA(
-                    metric=self.metric,
-                    max_metric_calls=max_metric_calls,
-                    reflection_minibatch_size=3,
-                    candidate_selection_strategy='pareto',
-                    reflection_lm=self.reflection_lm,
-                    skip_perfect_score=True,
-                    add_format_failure_as_feedback=True,
-                    use_merge=True,
-                    max_merge_invocations=5,
-                    failure_score=0.0,
-                    perfect_score=1.0,
-                    log_dir=log_dir or f"gepa_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    track_stats=track_stats,
-                    track_best_outputs=True,
-                    seed=42
-                )
-            else:
-                # Use max full evaluations (respects --generations flag)
-                dataset_size = len(trainset) + len(valset)
-                print(f"[GEPATweetOptimizer] Using explicit generation limit: {max_generations} full evaluations")
-                print(f"[GEPATweetOptimizer] This will run approximately {max_generations * dataset_size} metric calls")
-                gepa_optimizer = GEPA(
-                    metric=self.metric,
-                    max_full_evals=max_generations,
-                    reflection_minibatch_size=3,
-                    candidate_selection_strategy='pareto',
-                    reflection_lm=self.reflection_lm,
-                    skip_perfect_score=True,
-                    add_format_failure_as_feedback=True,
-                    use_merge=True,
-                    max_merge_invocations=5,
-                    failure_score=0.0,
-                    perfect_score=1.0,
-                    log_dir=log_dir or f"gepa_logs_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    track_stats=track_stats,
-                    track_best_outputs=True,
-                    seed=42
-                )
-        except TypeError as e:
-            # Fallback for older DSPy versions with different parameters
-            console.print(f"[yellow]Using compatibility mode for GEPA: {e}[/yellow]")
-            gepa_optimizer = GEPA(
-                metric=self.metric,
-                max_bootstrapped_demos=max_generations,
-                max_labeled_demos=max_generations,
-                num_candidates=3,
-                init_temperature=1.0
-            )
         
         # First, evaluate baseline module (before optimization)
         print("\n[GEPATweetOptimizer] Evaluating baseline module...")
@@ -371,8 +763,7 @@ class GEPATweetOptimizer:
             
             for i, example in enumerate(valset[:eval_count]):
                 try:
-                    # Generate with baseline module
-                    # Try to get the information_context field
+                    # Generate variants with baseline module
                     if hasattr(example, 'information_context'):
                         context = example.information_context
                     elif isinstance(example, dict) and 'information_context' in example:
@@ -381,17 +772,33 @@ class GEPATweetOptimizer:
                         # Fallback: use string representation
                         context = str(example)
                     
+                    # Generate multiple variants
                     prediction = student_module(information_context=context)
                     
-                    # Evaluate with metric
-                    result = self.metric(
-                        gold=example,
-                        pred=prediction,
-                        trace=None,
-                        pred_name=None,
-                        pred_trace=None
-                    )
-                    score = result.score if hasattr(result, 'score') else 0.5
+                    if hasattr(prediction, 'all_candidates'):
+                        # Score all variants
+                        variant_scores = self.metric.score_variants(
+                            gold=example,
+                            variants=prediction.all_candidates,
+                            task_id=f"baseline_{i}"
+                        )
+                        # Use best variant's score
+                        if variant_scores:
+                            # Extract numeric score from first variant
+                            score = float(variant_scores[0][0])  # First score from best variant
+                        else:
+                            score = 0.5
+                    else:
+                        # Fallback to single prediction scoring
+                        result = self.metric(
+                            gold=example,
+                            pred=prediction,
+                            trace=None,
+                            pred_name=None,
+                            pred_trace=None
+                        )
+                        score = float(result.score) if hasattr(result, 'score') else 0.5
+                    
                     baseline_scores.append(score)
                     successful_evals += 1
                     print(f"  Sample {i+1}: Score {score:.3f}")
@@ -431,9 +838,13 @@ class GEPATweetOptimizer:
         import logging
         import re
         
+        # Import required modules
+        import os
+        from datetime import datetime
+        
         # Capture GEPA's internal logs to extract scores AND evolved prompts
         class OptimizationCapture:
-            def __init__(self, baseline=0.3):
+            def __init__(self, baseline=0.3, log_dir=None):
                 self.best_score = 0.0
                 self.avg_scores = []
                 self.iteration_scores = []
@@ -441,6 +852,30 @@ class GEPATweetOptimizer:
                 self.evolved_prompt = None
                 self.capturing_prompt = False
                 self.prompt_lines = []
+                self.log_dir = log_dir
+                self.intermediate_prompts = []  # List to store (timestamp, score, prompt) tuples
+                
+            def save_intermediate_prompt(self, prompt_text, score):
+                """Save intermediate prompt with timestamp and score"""
+                if not self.log_dir:
+                    return
+                    
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self.intermediate_prompts.append((timestamp, score, prompt_text))
+                
+                # Create intermediate prompts directory
+                intermediate_dir = os.path.join(self.log_dir, "intermediate_prompts")
+                os.makedirs(intermediate_dir, exist_ok=True)
+                
+                # Save this prompt
+                prompt_path = os.path.join(intermediate_dir, f"prompt_{timestamp}_score_{score:.3f}.txt")
+                with open(prompt_path, 'w') as f:
+                    f.write(f"=== INTERMEDIATE GEPA PROMPT ===\n")
+                    f.write(f"Timestamp: {timestamp}\n")
+                    f.write(f"Score: {score:.3f}\n")
+                    f.write(f"Baseline: {self.baseline:.3f}\n")
+                    f.write(f"Improvement: +{(score - self.baseline):.3f}\n\n")
+                    f.write(prompt_text)
                 
             def parse_log(self, message):
                 # Parse "Average Metric: X / Y (Z%)"
@@ -457,7 +892,13 @@ class GEPATweetOptimizer:
                     if match:
                         score = float(match.group(1))
                         self.iteration_scores.append(score)
-                        self.best_score = max(self.best_score, score)
+                        # If this is a new best score, save the prompt
+                        if score > self.best_score:
+                            self.best_score = score
+                            # If we have a prompt being captured, save it
+                            if self.prompt_lines:
+                                current_prompt = "\n".join(self.prompt_lines)
+                                self.save_intermediate_prompt(current_prompt, score)
                 
                 # Capture evolved prompt text from GEPA logs
                 if "Proposed new text for generate.predict:" in message:
@@ -476,7 +917,7 @@ class GEPATweetOptimizer:
                     else:
                         self.prompt_lines.append(message)
         
-        optimization_capture = OptimizationCapture(baseline=baseline_score)
+        optimization_capture = OptimizationCapture(baseline=baseline_score, log_dir=log_dir)
         
         # Set up logging handler to capture scores and prompts
         class CaptureHandler(logging.Handler):
@@ -624,6 +1065,25 @@ class GEPATweetOptimizer:
                     f.write(f"Percentage Gain: N/A (baseline was 0)\n")
                 
                 print(f"[GEPATweetOptimizer] Saved optimized prompt to: {prompt_path}")
+                
+                # Save summary of intermediate prompts
+                if optimization_capture.intermediate_prompts:
+                    intermediate_dir = os.path.join(log_dir, "intermediate_prompts")
+                    summary_path = os.path.join(intermediate_dir, "summary.txt")
+                    with open(summary_path, 'w') as f:
+                        f.write("=== INTERMEDIATE PROMPTS SUMMARY ===\n\n")
+                        f.write(f"Total intermediate prompts saved: {len(optimization_capture.intermediate_prompts)}\n")
+                        f.write(f"Baseline score: {baseline_score:.3f}\n\n")
+                        
+                        # Sort by score
+                        sorted_prompts = sorted(optimization_capture.intermediate_prompts, key=lambda x: x[1], reverse=True)
+                        
+                        for i, (timestamp, score, _) in enumerate(sorted_prompts, 1):
+                            f.write(f"{i}. Timestamp: {timestamp} | Score: {score:.3f} | ")
+                            f.write(f"Improvement: +{(score - baseline_score):.3f}\n")
+                        
+                        print(f"[GEPATweetOptimizer] Saved intermediate prompts summary to: {summary_path}")
+                        print(f"[GEPATweetOptimizer] {len(optimization_capture.intermediate_prompts)} intermediate prompts saved")
         except Exception as e:
             print(f"[GEPATweetOptimizer] Could not save prompt: {e}")
         

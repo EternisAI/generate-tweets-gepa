@@ -249,7 +249,8 @@ Output only the tweet text."""
             from openrouter_config import setup_openrouter_model
             
             # If model doesn't have provider prefix, add openai/ for compatibility
-            if not any(model.startswith(p) for p in ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/']):
+            # Exception: deepseek-r1 should be used directly without prefix
+            if model not in ['deepseek-r1', 'deepseek-chat'] and not any(model.startswith(p) for p in ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/', 'deepseek/']):
                 model = f"openai/{model}"
             
             lm = setup_openrouter_model(model)
