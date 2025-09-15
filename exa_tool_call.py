@@ -91,6 +91,11 @@ class ExaToolCall:
             recent_only = arguments.get("recent_only", True)
             type_filter = "keyword"  # Always use keyword search by default
             
+            # Auto-detect if query is a link and set category to news
+            if self._is_link(query) and category == "general":
+                category = "news"
+                console.print(f"[cyan]🔗 Detected link in query, setting category to 'news'[/cyan]")
+            
             if not query:
                 return {"error": "Query parameter is required"}
             
@@ -188,6 +193,24 @@ class ExaToolCall:
             "total_calls": len(self.tool_calls_made),
             "calls": self.tool_calls_made
         }
+    
+    def _is_link(self, text: str) -> bool:
+        """Check if the text contains a URL/link"""
+        import re
+        
+        # Common URL patterns
+        url_patterns = [
+            r'https?://[^\s]+',  # http:// or https://
+            r'www\.[^\s]+',      # www.
+            r't\.co/[^\s]+',     # Twitter short links
+            r'[^\s]+\.[a-z]{2,}(?:/[^\s]*)?',  # domain.com patterns
+        ]
+        
+        for pattern in url_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        
+        return False
 
 def create_tool_call_handler() -> Optional[ExaToolCall]:
     """

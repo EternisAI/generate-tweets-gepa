@@ -65,6 +65,10 @@ D) Repeats context verbatim/near-verbatim: deduct 0.30
 - Condition: high overlap with CONTEXT (e.g., ≥70% phrase overlap or semantically identical restatement without novel angle).
 - Record: {"type":"context_repetition","weight":0.30,"reason":"Repeats input/context without new framing."}
 
+E) Contradictory phrasing pattern: deduct 0.15
+- Condition: uses "X is not Y. It is actually Z" or similar contradictory patterns ("This isn't..., it's actually...", "That's not..., that's...")
+- Record: {"type":"contradictory_phrasing","weight":0.15,"reason":"Uses contradictory 'X is not Y, it is actually Z' pattern."}
+
 Compute:
 penalty_total = sum(weights), clipped to [0, 0.90]
 final score = max(0, min(1, raw_score - penalty_total))
@@ -82,17 +86,29 @@ Return strictly JSON with these keys:
     {"type":"overlength","weight":0.30,"reason":"..."},
     {"type":"special_characters","weight":0.10,"reason":"Found hashtag."},
     {"type":"generic_formulaic","weight":0.20,"reason":"..."},
-    {"type":"context_repetition","weight":0.30,"reason":"..."}
+    {"type":"context_repetition","weight":0.30,"reason":"..."},
+    {"type":"contradictory_phrasing","weight":0.15,"reason":"Uses 'X is not Y, it is actually Z' pattern."}
     // include only those applied; may be empty []
   ],
   "penalty_total": <float 0-0.90>,
   "score": <float 0-1>,  // final score after penalties
-  "feedback": "<2–3 sentences on cognitive alignment and strategy; mention the most material strengths and the biggest penalty hits with 1 concrete fix.>"
+  "feedback": "<3–4 sentences on cognitive alignment and strategy. MANDATORY: For each penalty applied, provide specific actionable fix. Mention the most material strengths and explain how to address the biggest penalty hits with concrete examples.>"
 }
+
+PENALTY FEEDBACK REQUIREMENTS
+For each penalty applied, provide specific actionable feedback:
+
+A) Overlength penalty → "Trim to X characters by removing Y and condensing Z"
+B) Special characters penalty → "Remove hashtags/emojis and use text alternatives instead of emojis"
+C) Generic/formulaic penalty → "Add specific angle like [example] instead of generic phrasing"
+D) Context repetition penalty → "Reframe with fresh angle like [example] rather than restating the original"
+E) Contradictory phrasing penalty → "Replace contradictory structure with direct statement like [example]"
 
 ADDITIONAL RULES
 - Reward strategic thinking beyond surface-level; favor audience insight and cultural fluency.
 - Penalize if tweet is not ≤280 chars, contains hashtags/emojis or the sequences --, **, *, is generic/formulaic, or merely repeats CONTEXT.
+- MANDATORY: Include concrete examples in feedback for any penalties applied.
+- AVOID CONTRADICTORY PATTERNS: Never use "X is not Y. It is actually Z" phrasing. Instead use direct, constructive language.
 - Do not include any text outside the JSON object in your response.
 
     """

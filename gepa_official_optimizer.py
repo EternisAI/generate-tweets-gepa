@@ -675,11 +675,21 @@ Use tools when:
                                     arguments = tool_call['parameters']
                                     print(f"[TweetGenerator] Converting tool_name/parameters format to function/arguments")
                                 elif 'tool' in tool_call:
-                                    # Handle {"tool": "search_web", "query": "...", "num_results": 3, ...} format
+                                    # Handle multiple nested formats
                                     function_name = tool_call['tool']
-                                    # Extract all other keys as arguments
-                                    arguments = {k: v for k, v in tool_call.items() if k != 'tool'}
-                                    print(f"[TweetGenerator] Converting tool format to function/arguments")
+                                    
+                                    if 'params' in tool_call:
+                                        # Handle {"tool": "search_web", "params": {"query": "...", ...}} format
+                                        arguments = tool_call['params']
+                                        print(f"[TweetGenerator] Converting tool/params format to function/arguments")
+                                    elif 'parameters' in tool_call:
+                                        # Handle {"tool": "search_web", "parameters": {"query": "...", ...}} format
+                                        arguments = tool_call['parameters']
+                                        print(f"[TweetGenerator] Converting tool/parameters format to function/arguments")
+                                    else:
+                                        # Handle {"tool": "search_web", "query": "...", "num_results": 3, ...} format
+                                        arguments = {k: v for k, v in tool_call.items() if k != 'tool'}
+                                        print(f"[TweetGenerator] Converting tool format to function/arguments")
                             
                             if function_name and arguments and function_name == "search_web" and isinstance(arguments, dict):
                                     print(f"[TweetGenerator] ✅ Executing tool call {i}: {function_name}")
