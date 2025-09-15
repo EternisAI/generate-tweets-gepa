@@ -568,10 +568,10 @@ def main():
         print("Starting tweet search for the last 3 months...")
         # Search for tweets using time sharding for better coverage
         print("Starting tweet search with time sharding...")
-        base_query = "from:FT"
+        base_query = "from:allgarbled"
         tweets = client.search_tweets_sharded(
             base_query=base_query,
-            start="2025-01-10",
+            start="2024-09-10",
             end="2025-09-10",
             days_per_shard=7,
             target_count=2000
