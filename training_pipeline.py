@@ -311,8 +311,9 @@ Output only the tweet text."""
         
         console.print(f"[cyan]Using top {len(high_engagement)} high-engagement tweets for training[/cyan]\n")
         
-        # Create base module
-        student_module = TweetGeneratorModule()
+        # Create base module with tool calling if enabled
+        enable_tools = self.config.get('enable_tool_calling', False)
+        student_module = TweetGeneratorModule(enable_tool_calling=enable_tools)
         
         # Run GEPA optimization
         # When generations are specified explicitly, don't use auto mode

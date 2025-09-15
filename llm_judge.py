@@ -6,38 +6,95 @@ import re
 class TweetJudgeSignature(dspy.Signature):
     """You are a cognitive analysis expert evaluating tweet generation quality.
 
-You will evaluate how well a generated tweet demonstrates the strategic thinking, audience psychology, 
-and engagement mechanics shown in expert cognitive analysis examples.
+GOAL
+Evaluate how well a generated tweet demonstrates the strategic thinking, audience psychology, and engagement mechanics shown in expert cognitive analysis examples.
 
-Check first:
-- If the model did not output a valid tweet (empty, meta-text, instructions, or commentary instead of a tweet), assign a score of 0 and return feedback: "No tweet generated."
+INPUTS
+- TWEET: {{TWEET}}
+- CONTEXT (optional; the info/cognitive analysis the tweet is based on): {{CONTEXT}}
+- ANALYSIS_EXAMPLES (how experts reason about strategy/audience/engagement): {{ANALYSIS_EXAMPLES}}
 
-If a valid tweet is present, score each criterion on 0–1:
+VALIDATION (hard gate)
+If no valid tweet was generated—i.e., empty/whitespace, meta-text/instructions/commentary instead of a tweet, or a block that clearly labels itself as “analysis”, “instructions”, “variant list”, or similar—return:
+{
+  "strategic_understanding": 0,
+  "audience_psychology": 0,
+  "engagement_mechanics": 0,
+  "cultural_fluency": 0,
+  "execution_quality": 0,
+  "raw_score": 0,
+  "penalties": [],
+  "penalty_total": 0,
+  "score": 0,
+  "feedback": "No tweet generated."
+}
+and stop.
 
-1. Strategic Understanding (0-1) — Shows awareness of the strategic angle and positioning from the analysis
-2. Audience Psychology (0-1) — Demonstrates understanding of target audience and their motivations  
-3. Engagement Mechanics (0-1) — Uses proven engagement tactics (hooks, emotional triggers, social proof)
-4. Cultural Fluency (0-1) — Shows cultural awareness and relevance from the cognitive insights
-5. Execution Quality (0-1) — Well-crafted, clear, concise, under 280 characters
+SCORING (0–1 each)
+Score only if a valid tweet exists.
+1) strategic_understanding — Does the tweet show a clear strategic angle anchored in the analysis (positioning, reframing, or insight beyond surface-level)?
+2) audience_psychology — Does it speak to likely motivations/priors of the target audience (identity, status, curiosity, outrage/hope, insider knowledge)?
+3) engagement_mechanics — Hook quality, concreteness, emotional triggers, rhythm, social proof cues; avoids limp CTA clichés.
+4) cultural_fluency — Timeliness, references, and tone aligned with current platform culture; avoids dated/awkward phrasing.
+5) execution_quality — Clear, concise, coherent; ≤280 chars.
 
-The cognitive analysis examples show expert-level thinking about:
-- How to identify and leverage cultural context and trends
-- Understanding audience psychology and motivations
-- Strategic positioning and angle selection
-- Engagement optimization techniques
-- Risk assessment and controversy management
+Compute:
+raw_score = mean([strategic_understanding, audience_psychology, engagement_mechanics, cultural_fluency, execution_quality])
 
-Evaluate how well the generated tweet embodies these cognitive insights.
+PENALTIES (deduct from final score; include any that apply)
+Initialize penalty_total = 0 and an array penalties = [].
+Apply the following additive deductions, with a short reason for each applied item:
 
-Rules:
-- Reward tweets that show strategic thinking beyond surface-level content
-- Favor tweets that demonstrate audience awareness and psychological insight
-- Bonus for tweets that show cultural fluency and trend awareness
-- Penalize generic or formulaic responses that miss the strategic depth
+A) Overlength (>280 characters): deduct 0.30
+- Condition: character_count(TWEET) > 280
+- Record: {"type":"overlength","weight":0.30,"reason":"Tweet exceeds 280 characters."}
 
-Return:
-- JSON with criterion scores and final average `score` (0–1). If invalid, return 0.
-- 2–3 sentences of feedback on cognitive alignment and strategic thinking quality.
+B) Disallowed special characters: deduct 0.10 per category, up to 0.30 max
+- Categories to check (any occurrence):
+  1. Hashtags: "#" anywhere
+  2. Emojis: presence of emoji characters
+  3. Prohibited sequences: "--" or "**" or "*" (asterisk anywhere)
+- For each present category add {"type":"special_characters","weight":0.10,"reason":"Found <category>."}
+- Cap combined special-character penalties at 0.30.
+
+C) Generic/formulaic: deduct 0.20
+- Condition: tweet reads as template-y, clichéd, or boilerplate; shallow restatement without angle; empty CTA (“Thoughts?”) or listicle-y filler.
+- Record: {"type":"generic_formulaic","weight":0.20,"reason":"Lacks strategic depth or uses formulaic phrasing."}
+
+D) Repeats context verbatim/near-verbatim: deduct 0.30
+- Condition: high overlap with CONTEXT (e.g., ≥70% phrase overlap or semantically identical restatement without novel angle).
+- Record: {"type":"context_repetition","weight":0.30,"reason":"Repeats input/context without new framing."}
+
+Compute:
+penalty_total = sum(weights), clipped to [0, 0.90]
+final score = max(0, min(1, raw_score - penalty_total))
+
+OUTPUT (JSON ONLY)
+Return strictly JSON with these keys:
+{
+  "strategic_understanding": <float 0-1>,
+  "audience_psychology": <float 0-1>,
+  "engagement_mechanics": <float 0-1>,
+  "cultural_fluency": <float 0-1>,
+  "execution_quality": <float 0-1>,
+  "raw_score": <float 0-1>,
+  "penalties": [
+    {"type":"overlength","weight":0.30,"reason":"..."},
+    {"type":"special_characters","weight":0.10,"reason":"Found hashtag."},
+    {"type":"generic_formulaic","weight":0.20,"reason":"..."},
+    {"type":"context_repetition","weight":0.30,"reason":"..."}
+    // include only those applied; may be empty []
+  ],
+  "penalty_total": <float 0-0.90>,
+  "score": <float 0-1>,  // final score after penalties
+  "feedback": "<2–3 sentences on cognitive alignment and strategy; mention the most material strengths and the biggest penalty hits with 1 concrete fix.>"
+}
+
+ADDITIONAL RULES
+- Reward strategic thinking beyond surface-level; favor audience insight and cultural fluency.
+- Penalize if tweet is not ≤280 chars, contains hashtags/emojis or the sequences --, **, *, is generic/formulaic, or merely repeats CONTEXT.
+- Do not include any text outside the JSON object in your response.
+
     """
     
     information_sources: str = dspy.InputField(
@@ -80,8 +137,8 @@ class LLMJudge(dspy.Module):
         
         # Calculate overall score if not present
         if 'overall' not in evaluation:
-            scores = [v.get('score', 0.5) for k, v in evaluation.items() if isinstance(v, dict) and 'score' in v]
-            overall_score = sum(scores) / len(scores) if scores else 0.5
+            scores = [v.get('score', 0.2) for k, v in evaluation.items() if isinstance(v, dict) and 'score' in v]
+            overall_score = sum(scores) / len(scores) if scores else 0.2
             evaluation['overall'] = {'score': overall_score, 'reasoning': 'Averaged from component scores'}
         
         return dspy.Prediction(
@@ -92,12 +149,12 @@ class LLMJudge(dspy.Module):
     def _create_default_evaluation(self):
         """Create default evaluation structure for cognitive analysis"""
         return {
-            'strategic_understanding': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
-            'audience_psychology': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
-            'engagement_mechanics': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
-            'cultural_fluency': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
-            'execution_quality': {'score': 0.5, 'reasoning': 'Unable to evaluate'},
-            'overall': {'score': 0.5, 'reasoning': 'Default evaluation due to parsing error'}
+            'strategic_understanding': {'score': 0.2, 'reasoning': 'Unable to evaluate'},
+            'audience_psychology': {'score': 0.2, 'reasoning': 'Unable to evaluate'},
+            'engagement_mechanics': {'score': 0.2, 'reasoning': 'Unable to evaluate'},
+            'cultural_fluency': {'score': 0.2, 'reasoning': 'Unable to evaluate'},
+            'execution_quality': {'score': 0.2, 'reasoning': 'Unable to evaluate'},
+            'overall': {'score': 0.2, 'reasoning': 'Default evaluation due to parsing error'}
         }
 
 class ComparativeJudge(dspy.Module):

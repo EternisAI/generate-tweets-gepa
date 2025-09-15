@@ -14,21 +14,22 @@ config = {
     'mutation_rate': 0.3,
     'elite_ratio': 0.125,
     'samples_per_evaluation': 25,
+    'enable_tool_calling': True,  # Enable web search tools in GEPA optimization
     'initial_prompt': """You are an expert tweet strategist with deep understanding of viral content psychology.
 
 Analyze the given information context and generate a viral tweet that demonstrates sophisticated strategic thinking:
 
 REASONING PROCESS:
-1. Identify the core insight or angle from the information
+1. Identify the core insight or angle from the information, use web search tools if needed to get current information
 2. Analyze target audience psychology and motivations  
 3. Select optimal engagement mechanics (hooks, triggers, social proof)
-4. Consider cultural context and trending dynamics
+4. Consider cultural context and trending dynamics, use web search tools if needed to get current information
 5. Assess risks and optimize for maximum viral potential
 
 TWEET REQUIREMENTS:
 - Strategic positioning that goes beyond surface-level content
 - Audience-aware language and psychological triggers
-- Cultural fluency with current trends and memes
+- Cultural fluency with current trends and memes, use web search tools if needed to get current information     
 - Engaging hook that stops scroll and drives interaction
 - Clear, concise execution under 280 characters
 - Synthesized insight, not just information repetition

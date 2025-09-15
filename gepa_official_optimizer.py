@@ -21,6 +21,14 @@ import concurrent.futures
 from datetime import datetime
 from rich.console import Console
 
+# Import tool calling functionality
+try:
+    from exa_tool_call import ExaToolCall, get_all_tool_definitions
+    TOOL_CALLING_AVAILABLE = True
+except ImportError:
+    TOOL_CALLING_AVAILABLE = False
+    print("[GEPA] Warning: Tool calling not available - exa_tool_call not found")
+
 console = Console()
 
 # Define base class if not available in current DSPy version
@@ -230,7 +238,7 @@ Return:
                 score = max(0.0, min(1.0, score))
                 
             except (ValueError, TypeError):
-                score = 0.5  # Default mid-range score
+                score = 0.2  # Default low score for failed evaluations
             
             # Format feedback with timing guidance
             feedback = evaluation.feedback
@@ -238,7 +246,7 @@ Return:
                 feedback += f"\n\nTiming Guidance: {evaluation.timing_guidance}"
             
             # Add specific insights based on common issues
-            if score < 0.5:
+            if score < 0.2:
                 feedback += "\n\nKey issues to address:"
                 if "information" in feedback.lower():
                     feedback += "\n- Focus on extracting the most newsworthy elements"
@@ -400,7 +408,7 @@ class TweetGenerationSignature(dspy.Signature):
     )
 
 class TweetGeneratorModule(dspy.Module):
-    """DSPy module for tweet generation compatible with GEPA with structured generation"""
+    """DSPy module for tweet generation compatible with GEPA with structured generation and tool calling"""
     
     # Define available hook styles
     HOOK_STYLES = {
@@ -427,7 +435,8 @@ class TweetGeneratorModule(dspy.Module):
                  evidence_density: float = 0.5,
                  num_candidates: int = 3,
                  temperature: float = 0.7,
-                 seed: int = 42):
+                 seed: int = 42,
+                 enable_tool_calling: bool = True):
         """Initialize tweet generator with structured parameters
         
         Args:
@@ -437,6 +446,7 @@ class TweetGeneratorModule(dspy.Module):
             num_candidates: Number of candidates to generate
             temperature: Generation temperature for variety
             seed: Random seed for deterministic generation
+            enable_tool_calling: Whether to enable web search tool calling
         """
         super().__init__()
         
@@ -447,6 +457,17 @@ class TweetGeneratorModule(dspy.Module):
         self.num_candidates = max(1, num_candidates)
         self.temperature = temperature
         self.seed = seed
+        self.enable_tool_calling = enable_tool_calling and TOOL_CALLING_AVAILABLE
+        
+        # Initialize tool handler if enabled
+        self.tool_handler = None
+        if self.enable_tool_calling:
+            try:
+                self.tool_handler = ExaToolCall()
+                print(f"[TweetGenerator] Tool calling enabled")
+            except Exception as e:
+                print(f"[TweetGenerator] Tool calling setup failed: {e}")
+                self.enable_tool_calling = False
         
         # Set random seed for determinism
         import random
@@ -461,16 +482,32 @@ class TweetGeneratorModule(dspy.Module):
             'parameter_history': []
         }
         
-        # Create signature with structured guidance
-        class StructuredTweetSignature(TweetGenerationSignature):
-            """Enhanced signature with structural guidance"""
+        # Create signature with structured guidance and optional tool calling
+        if self.enable_tool_calling:
+            class ToolCallingTweetSignature(TweetGenerationSignature):
+                """Enhanced signature with structural guidance and tool calling"""
+                
+                # Add fields for generation guidance
+                hook_guidance = dspy.InputField(desc="Style guidance for the opening hook")
+                structure_template = dspy.InputField(desc="Overall tweet structure template")
+                evidence_guidance = dspy.InputField(desc="Guidance on evidence density")
+                tool_instructions = dspy.InputField(desc="Instructions for when to use web search tools")
+                
+                # Add tool calling outputs
+                tool_calls = dspy.OutputField(desc="JSON array of tool calls made (empty array if none)")
+                reasoning = dspy.OutputField(desc="Strategic reasoning including tool usage decisions")
             
-            # Add fields for generation guidance
-            hook_guidance = dspy.InputField(desc="Style guidance for the opening hook")
-            structure_template = dspy.InputField(desc="Overall tweet structure template")
-            evidence_guidance = dspy.InputField(desc="Guidance on evidence density")
-        
-        self.generate = dspy.ChainOfThought(StructuredTweetSignature)
+            self.generate = dspy.ChainOfThought(ToolCallingTweetSignature)
+        else:
+            class StructuredTweetSignature(TweetGenerationSignature):
+                """Enhanced signature with structural guidance"""
+                
+                # Add fields for generation guidance
+                hook_guidance = dspy.InputField(desc="Style guidance for the opening hook")
+                structure_template = dspy.InputField(desc="Overall tweet structure template")
+                evidence_guidance = dspy.InputField(desc="Guidance on evidence density")
+            
+            self.generate = dspy.ChainOfThought(StructuredTweetSignature)
         
         # Log configuration
         print(f"[TweetGenerator] Initialized with:")
@@ -478,6 +515,7 @@ class TweetGeneratorModule(dspy.Module):
         print(f"  Structure: {structure or 'default'}")
         print(f"  Evidence density: {evidence_density:.2f}")
         print(f"  Candidates: {num_candidates}")
+        print(f"  Tool calling: {'enabled' if self.enable_tool_calling else 'disabled'}")
     
     def _prepare_guidance(self):
         """Prepare structured guidance for generation"""
@@ -504,8 +542,27 @@ class TweetGeneratorModule(dspy.Module):
         
         return hook_guidance, structure_guidance, evidence_guidance
     
+    def _format_search_results(self, tool_result: dict) -> str:
+        """Format search results for context enhancement"""
+        
+        if not tool_result.get('results'):
+            return "No search results found."
+        
+        formatted_results = []
+        for i, result in enumerate(tool_result['results'][:3], 1):  # Top 3 results
+            title = result.get('title', 'Untitled')
+            summary = result.get('summary', '')[:150] + "..." if result.get('summary') else ""
+            
+            formatted_result = f"{i}. {title}"
+            if summary:
+                formatted_result += f" - {summary}"
+            
+            formatted_results.append(formatted_result)
+        
+        return "\n".join(formatted_results)
+    
     def forward(self, information_context):
-        """Generate multiple tweet candidates with structured guidance"""
+        """Generate multiple tweet candidates with structured guidance and optional tool calling"""
         
         # Prepare structural guidance
         hook_guidance, structure_guidance, evidence_guidance = self._prepare_guidance()
@@ -524,14 +581,158 @@ class TweetGeneratorModule(dspy.Module):
             random.seed(variant_seed)
             np.random.seed(variant_seed)
             
-            # Generate with structural guidance
+            # Generate with structural guidance and optional tool calling
             with dspy.settings.context(temperature=self.temperature):
-                result = self.generate(
-                    information_context=information_context,
-                    hook_guidance=hook_guidance,
-                    structure_template=structure_guidance,
-                    evidence_guidance=evidence_guidance
-                )
+                if self.enable_tool_calling:
+                    # Add tool calling instructions
+                    tool_instructions = """You have access to web search tools. If you need current information, recent news, or additional context to create a better tweet, you can call the search_web function.
+
+Available Tools:
+- search_web(query, num_results=5, category="general", recent_only=true): Search the web for current information
+  * Use category="news" for current events and breaking news
+  * Use category="research paper" for studies and academic content
+  * Use category="company" for business and corporate information
+
+Use tools when:
+- The information context seems outdated or lacks recent details
+- You need to verify facts or get current statistics
+- The topic would benefit from recent news or developments
+- You want to add timely context or trending information"""
+
+                    result = self.generate(
+                        information_context=information_context,
+                        hook_guidance=hook_guidance,
+                        structure_template=structure_guidance,
+                        evidence_guidance=evidence_guidance,
+                        tool_instructions=tool_instructions
+                    )
+                    
+                    # Process tool calls if any
+                    tool_calls_made = []
+                    enhanced_context = information_context
+                    
+                    print(f"[TweetGenerator] Checking for tool calls in result...")
+                    
+                    try:
+                        import json
+                        tool_calls_raw = result.tool_calls if hasattr(result, 'tool_calls') else "[]"
+                        
+                        # Handle empty or invalid tool calls
+                        if not tool_calls_raw or tool_calls_raw.strip() == "":
+                            print(f"[TweetGenerator] No tool calls found (empty or None)")
+                            tool_calls_data = []
+                        elif isinstance(tool_calls_raw, str):
+                            # Clean and validate JSON string
+                            tool_calls_raw = tool_calls_raw.strip()
+                            if tool_calls_raw.startswith('[') and tool_calls_raw.endswith(']'):
+                                try:
+                                    tool_calls_data = json.loads(tool_calls_raw)
+                                    print(f"[TweetGenerator] Parsed tool calls: {len(tool_calls_data)} calls found")
+                                    if tool_calls_data:
+                                        print(f"[TweetGenerator] Tool calls content: {tool_calls_raw[:200]}...")
+                                except json.JSONDecodeError:
+                                    print(f"[TweetGenerator] JSON parsing failed, trying regex extraction")
+                                    # Try to extract JSON from text
+                                    import re
+                                    json_match = re.search(r'\[.*\]', tool_calls_raw, re.DOTALL)
+                                    if json_match:
+                                        tool_calls_data = json.loads(json_match.group())
+                                        print(f"[TweetGenerator] Extracted {len(tool_calls_data)} tool calls via regex")
+                                    else:
+                                        print(f"[TweetGenerator] No valid JSON array found")
+                                        tool_calls_data = []
+                            else:
+                                print(f"[TweetGenerator] Tool calls string doesn't look like JSON array: {tool_calls_raw[:100]}...")
+                                tool_calls_data = []
+                        elif isinstance(tool_calls_raw, list):
+                            tool_calls_data = tool_calls_raw
+                            print(f"[TweetGenerator] Tool calls already a list: {len(tool_calls_data)} calls")
+                        else:
+                            print(f"[TweetGenerator] Unexpected tool calls type: {type(tool_calls_raw)}")
+                            tool_calls_data = []
+                        
+                        # Execute tool calls (limit to 2 for GEPA efficiency)
+                        if tool_calls_data:
+                            print(f"[TweetGenerator] Processing {len(tool_calls_data[:2])} tool calls...")
+                        else:
+                            print(f"[TweetGenerator] No valid tool calls to process")
+                            
+                        for i, tool_call in enumerate(tool_calls_data[:2], 1):
+                            # Handle both formats: {"function": "search_web", "arguments": {...}} and {"tool_name": "search_web", "parameters": {...}}
+                            function_name = None
+                            arguments = None
+                            
+                            if isinstance(tool_call, dict):
+                                if 'function' in tool_call and 'arguments' in tool_call:
+                                    function_name = tool_call['function']
+                                    arguments = tool_call['arguments']
+                                elif 'function' in tool_call and 'parameters' in tool_call:
+                                    function_name = tool_call['function']
+                                    arguments = tool_call['parameters']
+                                    print(f"[TweetGenerator] Converting function/parameters format to function/arguments")
+                                elif 'tool_name' in tool_call and 'parameters' in tool_call:
+                                    function_name = tool_call['tool_name']
+                                    arguments = tool_call['parameters']
+                                    print(f"[TweetGenerator] Converting tool_name/parameters format to function/arguments")
+                                elif 'tool' in tool_call:
+                                    # Handle {"tool": "search_web", "query": "...", "num_results": 3, ...} format
+                                    function_name = tool_call['tool']
+                                    # Extract all other keys as arguments
+                                    arguments = {k: v for k, v in tool_call.items() if k != 'tool'}
+                                    print(f"[TweetGenerator] Converting tool format to function/arguments")
+                            
+                            if function_name and arguments and function_name == "search_web" and isinstance(arguments, dict):
+                                    print(f"[TweetGenerator] ✅ Executing tool call {i}: {function_name}")
+                                    print(f"[TweetGenerator] Arguments: {arguments}")
+                                    
+                                    tool_result = self.tool_handler.execute_tool_call(function_name, arguments)
+                                    tool_calls_made.append({
+                                        'function': function_name,
+                                        'arguments': arguments,
+                                        'result': tool_result
+                                    })
+                                    
+                                    # Enhance context with search results
+                                    if not tool_result.get('error') and tool_result.get('results'):
+                                        search_context = self._format_search_results(tool_result)
+                                        enhanced_context = f"{information_context}\n\nSearch Results: {search_context}"
+                                        print(f"[TweetGenerator] ✅ Enhanced context with {len(tool_result['results'])} search results")
+                                    else:
+                                        print(f"[TweetGenerator] ❌ Tool call failed or returned no results: {tool_result.get('error', 'No results')}")
+                            else:
+                                if function_name:
+                                    print(f"[TweetGenerator] ❌ Skipping invalid tool call {i}: function='{function_name}', args_type={type(arguments)}")
+                                else:
+                                    print(f"[TweetGenerator] ❌ Skipping malformed tool call {i}: {tool_call}")
+                    
+                    except Exception as e:
+                        print(f"[TweetGenerator] Tool call processing failed: {e}")
+                        # Continue without tool calls
+                    
+                    # If we got enhanced context, regenerate
+                    if enhanced_context != information_context and tool_calls_made:
+                        print(f"[TweetGenerator] 🔄 Regenerating tweet with enhanced context ({len(tool_calls_made)} tool calls made)")
+                        result = self.generate(
+                            information_context=enhanced_context,
+                            hook_guidance=hook_guidance,
+                            structure_template=structure_guidance,
+                            evidence_guidance=evidence_guidance,
+                            tool_instructions="Use the search results provided in the context."
+                        )
+                        print(f"[TweetGenerator] ✅ Regeneration complete")
+                    else:
+                        if tool_calls_made:
+                            print(f"[TweetGenerator] ⚠️  Tool calls made but context unchanged")
+                        else:
+                            print(f"[TweetGenerator] ℹ️  No tool calls made, using original generation")
+                else:
+                    result = self.generate(
+                        information_context=information_context,
+                        hook_guidance=hook_guidance,
+                        structure_template=structure_guidance,
+                        evidence_guidance=evidence_guidance
+                    )
+                    tool_calls_made = []
             
             # Ensure 280 character limit
             tweet = result.generated_tweet
@@ -549,7 +750,9 @@ class TweetGeneratorModule(dspy.Module):
                     'temperature': self.temperature,
                     'generation_seed': generation_seed,
                     'variant_seed': variant_seed
-                }
+                },
+                'tool_calls': tool_calls_made,
+                'reasoning': getattr(result, 'reasoning', '') if self.enable_tool_calling else ''
             }
             candidates.append(variant)
             
@@ -787,7 +990,7 @@ class GEPATweetOptimizer:
                             # Extract numeric score from first variant
                             score = float(variant_scores[0][0])  # First score from best variant
                         else:
-                            score = 0.5
+                            score = 0.2
                     else:
                         # Fallback to single prediction scoring
                         result = self.metric(
@@ -797,7 +1000,7 @@ class GEPATweetOptimizer:
                             pred_name=None,
                             pred_trace=None
                         )
-                        score = float(result.score) if hasattr(result, 'score') else 0.5
+                        score = float(result.score) if hasattr(result, 'score') else 0.2
                     
                     baseline_scores.append(score)
                     successful_evals += 1
