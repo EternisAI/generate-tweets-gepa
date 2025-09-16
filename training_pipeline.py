@@ -413,30 +413,44 @@ Output only the tweet text."""
                 'engagement_score': tweet_data.engagement_score
             })
         
+        # Parallelize test evaluation
+        import concurrent.futures
+        MAX_WORKERS = int(os.getenv("TEST_WORKERS", "16"))
+        console.print(f"[cyan]Using {MAX_WORKERS} workers for test evaluation[/cyan]")
+        
+        def eval_sample(sample):
+            try:
+                result = generator(sample['information_context'])
+                eval_result = self.judge(
+                    information_sources=sample['information_context'],
+                    generated_tweet=result.generated_tweet,
+                    original_tweet=sample['original_tweet']
+                )
+                return {
+                    'overall_score': eval_result.overall_score,
+                    'evaluation': eval_result.evaluation,
+                    'generated_tweet': result.generated_tweet,
+                    'original_tweet': sample['original_tweet']
+                }
+            except Exception as e:
+                console.print(f"[red]Error evaluating sample: {e}[/red]")
+                return None
+        
         # Generate and evaluate
         evaluations = []
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
             task = progress.add_task("Evaluating test samples...", total=len(test_data_prepared))
             
-            for sample in test_data_prepared:
-                try:
-                    result = generator(sample['information_context'])
-                    eval_result = self.judge(
-                        information_sources=sample['information_context'],
-                        generated_tweet=result.generated_tweet,
-                        original_tweet=sample['original_tweet']
-                    )
-                    
-                    evaluations.append({
-                        'overall_score': eval_result.overall_score,
-                        'evaluation': eval_result.evaluation,
-                        'generated_tweet': result.generated_tweet,
-                        'original_tweet': sample['original_tweet']
-                    })
-                except Exception as e:
-                    console.print(f"[red]Error evaluating sample: {e}[/red]")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                # Submit all tasks
+                futures = [ex.submit(eval_sample, sample) for sample in test_data_prepared]
                 
-                progress.update(task, advance=1)
+                # Collect results as they complete
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    if result:
+                        evaluations.append(result)
+                    progress.update(task, advance=1)
         
         # Calculate statistics
         if evaluations:

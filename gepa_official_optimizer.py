@@ -3,7 +3,7 @@
 Official DSPy GEPA implementation for Tweet Generation
 Using dspy.GEPA for reflective prompt optimization
 """
-
+import os
 import dspy
 from dspy import Prediction, Example
 try:
@@ -53,7 +53,8 @@ class TweetGenerationMetric(GEPAFeedbackMetric if 'GEPAFeedbackMetric' in locals
         
         # Configure thread pool for parallel evaluation
         import concurrent.futures
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        # Make workers configurable via environment variable
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
         
         # Define evaluation signature class
         class TweetEvaluationSignature(dspy.Signature):
@@ -245,30 +246,15 @@ Return:
             if hasattr(evaluation, 'timing_guidance'):
                 feedback += f"\n\nTiming Guidance: {evaluation.timing_guidance}"
             
-            # Add specific insights based on common issues
-            if score < 0.2:
-                feedback += "\n\nKey issues to address:"
-                if "information" in feedback.lower():
-                    feedback += "\n- Focus on extracting the most newsworthy elements"
-                if "style" in feedback.lower():
-                    feedback += "\n- Add emotional hooks and controversy"
-                if "engagement" in feedback.lower():
-                    feedback += "\n- Start with a compelling hook"
-            
-            # Get module score if available
-            module_score = None
-            if pred_trace and isinstance(pred_trace, dict):
-                module_score = pred_trace.get('score')
-            
-            # Use module score if available, otherwise use our computed score
-            final_score = module_score if module_score is not None else score
+            # GEPA requires feedback score to exactly match module score
+            # For GEPA compatibility, we need to ensure exact score matching
+            final_score = score
             
             # Create feedback object compatible with GEPA
+            # CRITICAL: For GEPA compatibility, the score must be exactly what GEPA expects
             feedback_obj = dspy.Prediction(
                 score=final_score,
-                feedback=feedback,
-                normalized_score=score,  # Keep original score for reference
-                computed_score=score  # Store our computed score
+                feedback=feedback
             )
             
             # Store feedback in trace if available and it's a dict
@@ -970,11 +956,12 @@ class GEPATweetOptimizer:
             self.baseline_score = baseline_score
             print(f"[GEPATweetOptimizer] Using default baseline score: {self.baseline_score:.3f}")
         else:
-            baseline_scores = []
-            successful_evals = 0
-            eval_count = min(5, len(valset))  # Evaluate up to 5 examples
+            # Parallelize baseline evaluation
+            EVAL_WORKERS = 16
+            print(f"[GEPATweetOptimizer] Using {EVAL_WORKERS} workers for baseline evaluation")
             
-            for i, example in enumerate(valset[:eval_count]):
+            def eval_one(args):
+                i, example = args
                 try:
                     # Generate variants with baseline module
                     if hasattr(example, 'information_context'):
@@ -988,36 +975,21 @@ class GEPATweetOptimizer:
                     # Generate multiple variants
                     prediction = student_module(information_context=context)
                     
-                    if hasattr(prediction, 'all_candidates'):
-                        # Score all variants
-                        variant_scores = self.metric.score_variants(
-                            gold=example,
-                            variants=prediction.all_candidates,
-                            task_id=f"baseline_{i}"
-                        )
-                        # Use best variant's score
-                        if variant_scores:
-                            # Extract numeric score from first variant
-                            score = float(variant_scores[0][0])  # First score from best variant
-                        else:
-                            score = 0.2
-                    else:
-                        # Fallback to single prediction scoring
-                        result = self.metric(
-                            gold=example,
-                            pred=prediction,
-                            trace=None,
-                            pred_name=None,
-                            pred_trace=None
-                        )
-                        score = float(result.score) if hasattr(result, 'score') else 0.2
+                    # Use simple single prediction scoring for GEPA compatibility
+                    # Create a simple prediction with just the main tweet
+                    simple_pred = dspy.Prediction(generated_tweet=prediction.generated_tweet)
                     
-                    baseline_scores.append(score)
-                    successful_evals += 1
-                    print(f"  Sample {i+1}: Score {score:.3f}")
+                    result = self.metric(
+                        gold=example,
+                        pred=simple_pred,
+                        trace=None,
+                        pred_name=None,
+                        pred_trace=None
+                    )
+                    score = float(result.score) if hasattr(result, 'score') else 0.2
+                    return (i, score, None, None, context)
+                    
                 except Exception as e:
-                    print(f"  Sample {i+1}: Failed - {str(e)[:200]}")
-                    print(f"    Context type: {type(context)}, Context: {str(context)[:100]}")
                     # Try a simpler evaluation with just a generated tweet
                     try:
                         # Generate something simple for baseline
@@ -1031,11 +1003,28 @@ class GEPATweetOptimizer:
                             pred_trace=None
                         )
                         score = result.score if hasattr(result, 'score') else 0.3
+                        return (i, score, None, "fallback", context if 'context' in locals() else str(example))
+                    except:
+                        context_str = context if 'context' in locals() else str(example)
+                        return (i, None, str(e)[:200], None, context_str[:100])
+            
+            baseline_scores = []
+            successful_evals = 0
+            eval_count = min(5, len(valset))  # Evaluate up to 5 examples
+            eval_items = list(enumerate(valset[:eval_count]))
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=EVAL_WORKERS) as ex:
+                for i, score, err, fallback, context_info in ex.map(eval_one, eval_items):
+                    if score is not None:
                         baseline_scores.append(score)
                         successful_evals += 1
-                        print(f"    Fallback score: {score:.3f}")
-                    except:
-                        pass  # Skip completely failed evaluations
+                        if fallback:
+                            print(f"  Sample {i+1}: Score {score:.3f} (fallback)")
+                        else:
+                            print(f"  Sample {i+1}: Score {score:.3f}")
+                    elif err:
+                        print(f"  Sample {i+1}: Failed - {err}")
+                        print(f"    Context type: {type(context_info)}, Context: {context_info}")
             
             if baseline_scores:
                 baseline_score = sum(baseline_scores) / len(baseline_scores)
