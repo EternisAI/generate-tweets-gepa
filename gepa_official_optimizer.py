@@ -51,10 +51,17 @@ class TweetGenerationMetric(GEPAFeedbackMetric if 'GEPAFeedbackMetric' in locals
         # Track best variants
         self.best_variants = {}  # {task_id: [(score, variant_id, tweet)]}
         
+        # Track current generation for curriculum learning
+        self.current_generation = 0
+        
         # Configure thread pool for parallel evaluation
         import concurrent.futures
         # Make workers configurable via environment variable
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+    
+    def set_generation(self, generation: int):
+        """Update the current generation for curriculum learning"""
+        self.current_generation = generation
         
         # Define evaluation signature class
         class TweetEvaluationSignature(dspy.Signature):
@@ -197,43 +204,66 @@ Return:
             
             # Evaluate with engagement context
             with dspy.context(lm=self.judge_lm):
-                evaluation = self.evaluator(
-                    information_sources=information_context,
-                    generated_tweet=generated_tweet,
-                    original_tweet=original_tweet,
-                    post_time=current_time,
-                    audience_size=str(audience_size),
-                    platform_activity=str(platform_activity),
-                    trending_topics=trending_topics
-                )
+                # Check if evaluator supports curriculum learning (has training_generation parameter)
+                try:
+                    evaluation = self.evaluator(
+                        information_sources=information_context,
+                        generated_tweet=generated_tweet,
+                        original_tweet=original_tweet,
+                        post_time=current_time,
+                        audience_size=str(audience_size),
+                        platform_activity=str(platform_activity),
+                        trending_topics=trending_topics,
+                        training_generation=self.current_generation
+                    )
+                except TypeError:
+                    # Fallback for evaluators that don't support training_generation
+                    evaluation = self.evaluator(
+                        information_sources=information_context,
+                        generated_tweet=generated_tweet,
+                        original_tweet=original_tweet,
+                        post_time=current_time,
+                        audience_size=str(audience_size),
+                        platform_activity=str(platform_activity),
+                        trending_topics=trending_topics
+                    )
             
             # Parse normalized score
             try:
                 raw_score = float(evaluation.score)
                 
-                # Apply time-of-day normalization
-                hour = int(current_time.split(":")[0])
-                # Higher weights during peak hours (8-22)
-                time_factor = 1.0 if 8 <= hour <= 22 else 0.7
+                # Check if we're using penalty judge - skip normalization for penalty judge
+                # as it already provides rule-based scoring
+                is_penalty_judge = hasattr(evaluation, 'penalties') or hasattr(evaluation, 'penalty_evaluation')
                 
-                # Apply audience size normalization
-                try:
-                    audience = float(audience_size)
-                    # Log scale normalization
-                    import math
-                    audience_factor = min(1.0, math.log10(audience) / math.log10(1000000))
-                except:
-                    audience_factor = 0.5
-                
-                # Apply platform activity normalization
-                try:
-                    activity = float(platform_activity)
-                    activity_factor = min(1.0, max(0.1, activity))
-                except:
-                    activity_factor = 0.5
-                
-                # Combine normalizations
-                score = raw_score * time_factor * audience_factor * activity_factor
+                if is_penalty_judge:
+                    # Penalty judge already provides accurate scoring, no normalization needed
+                    score = raw_score
+                else:
+                    # Apply normalization for cognitive judge only
+                    # Apply time-of-day normalization
+                    hour = int(current_time.split(":")[0])
+                    # Higher weights during peak hours (8-22)
+                    time_factor = 1.0 if 8 <= hour <= 22 else 0.7
+                    
+                    # Apply audience size normalization
+                    try:
+                        audience = float(audience_size)
+                        # Log scale normalization
+                        import math
+                        audience_factor = min(1.0, math.log10(audience) / math.log10(1000000))
+                    except:
+                        audience_factor = 0.5
+                    
+                    # Apply platform activity normalization
+                    try:
+                        activity = float(platform_activity)
+                        activity_factor = min(1.0, max(0.1, activity))
+                    except:
+                        activity_factor = 0.5
+                    
+                    # Combine normalizations
+                    score = raw_score * time_factor * audience_factor * activity_factor
                 
                 # Ensure final score is between 0 and 1
                 score = max(0.0, min(1.0, score))

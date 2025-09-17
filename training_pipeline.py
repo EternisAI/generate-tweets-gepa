@@ -12,7 +12,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from data_processor import DataProcessor, TweetData
-from llm_judge import LLMJudge, ComparativeJudge, PromptFeedback
+from llm_judge import LLMJudge, ComparativeJudge, PenaltyEnforcer, PromptFeedback
 from gepa_official_optimizer import GEPATweetOptimizer, TweetGeneratorModule
 
 console = Console()
@@ -179,17 +179,53 @@ class TrainingPipeline:
         
         # Initialize modules
         self.optimized_module = None
-        self.judge = LLMJudge()
+        
+        # Initialize judge based on configuration
+        judge_type = self.config.get('judge_type', 'cognitive')
+        self.judge = self._create_judge(judge_type)
         self.comparative_judge = ComparativeJudge()
         self.feedback_generator = PromptFeedback()
+        
+        console.print(f"[cyan]Using judge type: {judge_type}[/cyan]")
+        console.print(f"[cyan]Judge instance: {type(self.judge).__name__}[/cyan]")
         
         # Metrics tracker
         self.metrics_tracker = MetricsTracker(self.config['output_dir'])
         
-        # Official GEPA Optimizer (will use settings.lm for judge and create reflection LM)
+        # Official GEPA Optimizer - pass the selected judge
         self.optimizer = GEPATweetOptimizer()
+        # Override the optimizer's evaluator with our selected judge
+        self.optimizer.metric.evaluator = self.judge
         
         console.print("[green]Pipeline initialized successfully![/green]\n")
+    
+    def _create_judge(self, judge_type: str):
+        """Create the appropriate judge based on type
+        
+        Args:
+            judge_type: Type of judge ('cognitive' or 'penalty')
+            
+        Returns:
+            Judge instance
+        """
+        
+        if judge_type == 'cognitive':
+            # Check if curriculum learning is enabled
+            enable_curriculum = self.config.get('enable_curriculum', False)
+            total_generations = self.config.get('num_generations', 100)
+            
+            if enable_curriculum:
+                console.print(f"[green]✓ Initializing Cognitive Judge with Curriculum Learning ({total_generations} generations)[/green]")
+                return LLMJudge(enable_curriculum=True, total_generations=total_generations)
+            else:
+                console.print("[green]✓ Initializing Cognitive Analysis Judge (LLMJudge)[/green]")
+                return LLMJudge()
+        elif judge_type == 'penalty':
+            console.print("[green]✓ Initializing Penalty Enforcement Judge[/green]")
+            return PenaltyEnforcer()
+        else:
+            console.print(f"[yellow]Unknown judge type '{judge_type}', defaulting to cognitive[/yellow]")
+            return LLMJudge()
     
     def get_default_config(self) -> Dict:
         """Get default configuration"""
@@ -249,8 +285,9 @@ Output only the tweet text."""
             from openrouter_config import setup_openrouter_model
             
             # If model doesn't have provider prefix, add openai/ for compatibility
-            # Exception: deepseek-r1 should be used directly without prefix
-            if model not in ['deepseek-r1', 'deepseek-chat'] and not any(model.startswith(p) for p in ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/', 'deepseek/']):
+            # Exception: some models should be used directly without prefix
+            known_prefixes = ['openai/', 'anthropic/', 'google/', 'meta/', 'mistral/', 'deepseek/', 'moonshotai/', 'nousresearch/', 'openrouter/']
+            if model not in ['deepseek-r1', 'deepseek-chat'] and not any(model.startswith(p) for p in known_prefixes):
                 model = f"openai/{model}"
             
             lm = setup_openrouter_model(model)
